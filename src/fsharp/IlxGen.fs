@@ -6469,13 +6469,10 @@ and GenTypeDef cenv mgbuf lazyInitInfo eenv m (tycon:Tycon) =
                                                           None))
                       yield ilMethodDef
                   | None,_ ->
-                      //printfn "sprintf not found"
                       ()
                   | _,None ->
-                      //printfn "new formatnot found"
                       ()
                   | _ ->
-                      //printfn "neither found, or non-method"
                       ()
               | _ -> () ]
               
