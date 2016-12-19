@@ -6456,7 +6456,7 @@ and GenTypeDef cenv mgbuf lazyInitInfo eenv m (tycon:Tycon) =
                                                          (true,[],2,
                                                           nonBranchingInstrsToCode 
                                                             ([ // load the hardwired format string
-                                                               yield I_ldstr "%A"  
+                                                               yield I_ldstr "%+A"  
                                                                // make the printf format object
                                                                yield mkNormalNewobj newFormatMethSpec
                                                                // call sprintf
@@ -6467,7 +6467,8 @@ and GenTypeDef cenv mgbuf lazyInitInfo eenv m (tycon:Tycon) =
                                                                   yield mkNormalLdobj ilThisTy  ] @
                                                              callInstrs),
                                                           None))
-                      yield ilMethodDef
+                      let mdef = { ilMethodDef with CustomAttrs = mkILCustomAttrs [ cenv.g.CompilerGeneratedAttribute ] }
+                      yield mdef
                   | None,_ -> ()
                   | _,None -> ()
                   | _ -> ()
