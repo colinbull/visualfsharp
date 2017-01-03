@@ -2054,7 +2054,7 @@ and ReportNoCandidatesError (csenv:ConstraintSolverEnv) (nUnnamedCallerArgs,nNam
                         cmeth.ArgSets
                         |> List.exists (fun argSet ->
                             argSet.UnnamedCallerArgs 
-                            |> List.exists (fun c -> c.Expr.ToString().EndsWith "Sequential"))
+                            |> List.exists (fun c -> c.Expr.ToString().StartsWith "Sequential"))
 
                     if couldBeNameArgs then
                         Error (FSComp.SR.csCtorSignatureMismatchArityProp(methodName, nReqd, nActual, signature), m)
