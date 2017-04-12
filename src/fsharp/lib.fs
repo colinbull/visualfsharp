@@ -391,7 +391,7 @@ let inline cacheOptRef cache f =
 // It is related to recursive class loading in multi-assembly NGEN scenarios. The bug has been fixed but
 // not yet deployed.
 // The bug manifests itself as an ExecutionEngine failure or fast-fail process exit which comes
-// and goes depending on whether components are NGEN'd or not, e.g. 'ngen install FSharp.COmpiler.dll'
+// and goes depending on whether components are NGEN'd or not, e.g. 'ngen install FSharp.Compiler.dll'
 // One workaround for the bug is to break NGEN loading and fixups into smaller fragments. Roughly speaking, the NGEN
 // loading process works by doing delayed fixups of references in NGEN code. This happens on a per-method basis.
 // e.g. one manifestation is that a 'print' before calling a method like LexFilter.create gets
@@ -535,12 +535,11 @@ module UnmanagedProcessExecutionOptions =
     extern UInt32 private GetLastError()
 
     // Translation of C# from http://swikb/v1/DisplayOnlineDoc.aspx?entryID=826 and copy in bug://5018
-#if FX_NO_SECURITY_PERMISSIONS
-#else
+#if !FX_NO_SECURITY_PERMISSIONS
     [<System.Security.Permissions.SecurityPermission(System.Security.Permissions.SecurityAction.Assert,UnmanagedCode = true)>] 
 #endif
     let EnableHeapTerminationOnCorruption() =
-#if NO_HEAPTERMINATION
+#if FX_NO_HEAPTERMINATION
         ()
 #else
         if (System.Environment.OSVersion.Version.Major >= 6 && // If OS is Vista or higher

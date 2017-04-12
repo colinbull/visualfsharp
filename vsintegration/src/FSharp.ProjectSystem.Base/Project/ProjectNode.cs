@@ -223,7 +223,6 @@ namespace Microsoft.VisualStudio.FSharp.ProjectSystem
         ASYNC
     }
 
-#if FX_ATLEAST_45
     internal static class VsBuildManagerAccessorExtensionMethods
     {
         public static bool IsInProgress(this IVsBuildManagerAccessor buildManagerAccessor)
@@ -238,68 +237,6 @@ namespace Microsoft.VisualStudio.FSharp.ProjectSystem
             return batchBuildId != 0;
         }
     }
-#else
-    internal class BuildInProgressException : InvalidOperationException
-    {
-        public BuildInProgressException()
-            : base(SR.GetString(SR.CannotBuildWhenBuildInProgress))
-        {
-        }
-    }
-
-    internal class FSharpBuildStatus
-    {
-        private static BuildKind? currentBuild;
-
-        public static bool StartBuild(BuildKind kind)
-        {
-            if (!currentBuild.HasValue)
-            {
-                currentBuild = kind;
-                return true;
-            }
-            var currentBuildKind = currentBuild.Value;
-            switch (currentBuild)
-            {
-                case BuildKind.SYNC:
-                    // Attempt to start a build during sync build indicate reentrancy
-                    Debug.Fail("Message pumping during sync build");
-                    return false;
-                case BuildKind.ASYNC:
-                    if (kind == BuildKind.SYNC)
-                    {
-                        // if we need to do a sync build during async build, there is not much we can do:
-                        // - the async build is user-invoked build
-                        // - during that build UI thread is by design not blocked and messages are being pumped
-                        // - therefore it is legitimate for other code to call Project System APIs and query for stuff
-                        // In that case we just fail gracefully
-                        return false;
-                    }
-                    else
-                    {
-                        // Somebody attempted to start a build while build is in progress, perhaps and Addin via
-                        // the API. Inform them of an error in their ways.
-                        throw new BuildInProgressException();
-                    }
-                default:
-                    Debug.Fail("Unreachable");
-                    return false;
-
-            }
-        }
-
-        public static void EndBuild()
-        {
-            Debug.Assert(IsInProgress, "Attempt to end a build that is not started");
-            currentBuild = null;
-        }
-
-        public static bool IsInProgress
-        {
-            get { return currentBuild.HasValue; }
-        }
-    }
-#endif
 
     internal struct BuildResult
     {
@@ -554,11 +491,11 @@ namespace Microsoft.VisualStudio.FSharp.ProjectSystem
 
         private ConfigProvider configProvider;
 
-        private TaskProvider taskProvider;
+        private Shell.TaskProvider taskProvider;
 
         private TaskReporter taskReporter;
 
-        private ErrorListProvider projectErrorListProvider;
+        private Shell.ErrorListProvider projectErrorListProvider;
 
         private ExtensibilityEventsHelper myExtensibilityEventsHelper;
 
@@ -677,7 +614,7 @@ namespace Microsoft.VisualStudio.FSharp.ProjectSystem
 
         public abstract string TargetFSharpCoreVersion { get; set; }
 
-        internal ErrorListProvider ProjectErrorsTaskListProvider 
+        internal Shell.ErrorListProvider ProjectErrorsTaskListProvider 
         {
             get { return projectErrorListProvider; }
         }
@@ -1143,7 +1080,7 @@ namespace Microsoft.VisualStudio.FSharp.ProjectSystem
         /// <summary>
         /// Gets the taskprovider.
         /// </summary>
-        public TaskProvider TaskProvider
+        public Shell.TaskProvider TaskProvider
         {
             get
             {
@@ -1455,15 +1392,15 @@ namespace Microsoft.VisualStudio.FSharp.ProjectSystem
             {
                 taskProvider.Dispose();
             }
-            taskProvider = new TaskProvider(this.site);
-            taskReporter = new TaskReporter("Project System (ProjectNode.cs)");
+            taskProvider = new Shell.TaskProvider ( this.site);
+            taskReporter = new TaskReporter ("Project System (ProjectNode.cs)");
             taskReporter.TaskListProvider = new TaskListProvider(taskProvider);
             if (projectErrorListProvider != null)
             {
                 projectErrorListProvider.Dispose();
             }
 
-            projectErrorListProvider = new ErrorListProvider(this.site);
+            projectErrorListProvider = new Shell.ErrorListProvider (this.site);
 
             return VSConstants.S_OK;
         }
@@ -2331,7 +2268,7 @@ namespace Microsoft.VisualStudio.FSharp.ProjectSystem
             {
                 this.SetCurrentConfiguration();
                 this.UpdateMSBuildState();
-                var result = this.InvokeMsBuild(ProjectFileConstants.AllProjectOutputGroups, false);
+                var result = this.InvokeMsBuild(ProjectFileConstants.AllProjectOutputGroups);
                 if (result.ProjectInstance != null) return result.ProjectInstance.GetPropertyValue(propertyName);
             };
             return this.GetProjectProperty(propertyName, true);
@@ -3010,9 +2947,7 @@ namespace Microsoft.VisualStudio.FSharp.ProjectSystem
                 this.ProcessCustomBuildActions();
 
                 this.ProcessFilesAndFolders();
-
-
-
+                
                 this.LoadNonBuildInformation();
 
                 this.InitSccInfo();
@@ -3206,11 +3141,6 @@ namespace Microsoft.VisualStudio.FSharp.ProjectSystem
         [SuppressMessage("Microsoft.Naming", "CA1709:IdentifiersShouldBeCasedCorrectly", MessageId = "Ms")]
         internal virtual BuildResult InvokeMsBuild(string target, IEnumerable<KeyValuePair<string, string>> extraProperties = null)
         {
-            return InvokeMsBuild(target, false, extraProperties);
-        }
-
-        internal virtual BuildResult InvokeMsBuild(string target, bool isBeingCalledByComputeSourcesAndFlags, IEnumerable<KeyValuePair<string, string>> extraProperties = null)
-        {
             UIThread.MustBeCalledFromUIThread();
             ProjectInstance projectInstance = null;
 
@@ -3219,10 +3149,6 @@ namespace Microsoft.VisualStudio.FSharp.ProjectSystem
             if (submission != null)
             {
                 MSBuildResult result = (submission.BuildResult.OverallResult == BuildResultCode.Success) ? MSBuildResult.Successful : MSBuildResult.Failed;
-                if (!isBeingCalledByComputeSourcesAndFlags)
-                {
-                    this.ComputeSourcesAndFlags();
-                }
                 return new BuildResult(result, projectInstance);
             }
             else
@@ -3357,15 +3283,6 @@ namespace Microsoft.VisualStudio.FSharp.ProjectSystem
         {
             UIThread.MustBeCalledFromUIThread();
 
-#if FX_ATLEAST_45
-#else
-            if (!FSharpBuildStatus.StartBuild(buildKind))
-            {
-                if (uiThreadCallback != null) uiThreadCallback(MSBuildResult.Failed, projectInstance);
-                return null;
-            }
-#endif
-
             IVsBuildManagerAccessor accessor = null;
             Microsoft.Build.Framework.ILogger[] loggers;
             BuildSubmission submission;
@@ -3389,10 +3306,6 @@ namespace Microsoft.VisualStudio.FSharp.ProjectSystem
                 if (!ba.IsOk)
                 {
                     ba.Dispose();
-#if FX_ATLEAST_45
-#else
-                    FSharpBuildStatus.EndBuild();
-#endif
                     if (uiThreadCallback != null) uiThreadCallback(MSBuildResult.Failed, projectInstance);
                     return null;
                 }
@@ -3437,10 +3350,6 @@ namespace Microsoft.VisualStudio.FSharp.ProjectSystem
             }
             catch (Exception)
             {
-#if FX_ATLEAST_45
-#else
-                FSharpBuildStatus.EndBuild();
-#endif
                 if (buildAccessorAccess != null)
                 {
                     buildAccessorAccess.Dispose();
@@ -3501,10 +3410,6 @@ namespace Microsoft.VisualStudio.FSharp.ProjectSystem
             }
             finally
             {
-#if FX_ATLEAST_45
-#else
-                FSharpBuildStatus.EndBuild();
-#endif
                 buildAccessorAccess.Dispose();
             }
         }
@@ -3923,11 +3828,7 @@ namespace Microsoft.VisualStudio.FSharp.ProjectSystem
         /// </summary>
         public virtual void SetCurrentConfiguration()
         {
-#if FX_ATLEAST_45
             if ((this.GetService(typeof(SVsBuildManagerAccessor)) as IVsBuildManagerAccessor).IsInProgress())
-#else
-            if (FSharpBuildStatus.IsInProgress)
-#endif
             {
                 // we are building so this should already be the current configuration
                 return;
@@ -3953,11 +3854,7 @@ namespace Microsoft.VisualStudio.FSharp.ProjectSystem
 
             // We cannot change properties during the build so if the config
             // we want to se is the current, we do nothing otherwise we fail.
-#if FX_ATLEAST_45
             if ((this.GetService(typeof(SVsBuildManagerAccessor)) as IVsBuildManagerAccessor).IsInProgress())
-#else
-            if (FSharpBuildStatus.IsInProgress)
-#endif
             {
                 if (this.projectOpened)
                 {
@@ -5551,8 +5448,13 @@ namespace Microsoft.VisualStudio.FSharp.ProjectSystem
             {
                 return VSConstants.E_FAIL;
             }
-            //Fail if the document names passed are null.
+            
+            // Fail if the document names passed are null.
             if (oldMkDoc == null || newMkDoc == null)
+                return VSConstants.E_INVALIDARG;
+
+            // Fail if the document names passed are equal.
+            if (oldMkDoc == newMkDoc)
                 return VSConstants.E_INVALIDARG;
 
             int hr = VSConstants.S_OK;
@@ -6227,16 +6129,31 @@ namespace Microsoft.VisualStudio.FSharp.ProjectSystem
             return VSConstants.S_OK;
         }
 
+        public bool IsUsingMicrosoftNetSdk()
+        {
+            // Nasty hack to see if we are using dotnet sdk, the SDK team will add a property in the future.
+            var c = GetProjectProperty("MSBuildAllProjects");
+            if (!string.IsNullOrWhiteSpace(c))
+            {
+                return c.Contains("Microsoft.NET.Sdk.props");
+            }
+            return false;
+        }
+
         public int UpgradeProject(uint grfUpgradeFlags)
         {
-            var hasTargetFramework = IsTargetFrameworkInstalled();
-            if (!hasTargetFramework)
+            if (!IsUsingMicrosoftNetSdk())
             {
-                hasTargetFramework = ShowRetargetingDialog();
+                var hasTargetFramework = IsTargetFrameworkInstalled();
+                if (!hasTargetFramework)
+                {
+                    hasTargetFramework = ShowRetargetingDialog();
+                }
+                // VSConstants.OLE_E_PROMPTSAVECANCELLED causes the shell to leave project unloaded
+                return hasTargetFramework ? VSConstants.S_OK : VSConstants.OLE_E_PROMPTSAVECANCELLED;
             }
-            // VSConstants.OLE_E_PROMPTSAVECANCELLED causes the shell to leave project unloaded
-            return hasTargetFramework ? VSConstants.S_OK : VSConstants.OLE_E_PROMPTSAVECANCELLED;
-        }
+            return VSConstants.S_OK;
+}
 
         /// <summary>
         /// Initialize projectNode

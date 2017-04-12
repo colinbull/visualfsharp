@@ -42,10 +42,6 @@ type Fsc = class
              member SourceLink : string with get,set
              member Sources : Microsoft.Build.Framework.ITaskItem [] with get,set
              member TargetType : string with get,set
-#if FX_ATLEAST_35
-#else
-             member ToolExe : string with get,set
-#endif             
              member ToolPath : string with get,set
              member TreatWarningsAsErrors : bool with get,set
              member Utf8Output : bool with get,set
@@ -59,4 +55,7 @@ type Fsc = class
              member HighEntropyVA : bool with get,set
              member TargetProfile : string with get,set
              member DotnetFscCompilerPath : string with get,set
+             member SkipCompilerExecution : bool with get,set
+             member ProvideCommandLineArgs : bool with get,set
+             member CommandLineArgs : Microsoft.Build.Framework.ITaskItem [] with get,set
            end

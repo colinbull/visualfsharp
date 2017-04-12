@@ -10,7 +10,6 @@ namespace Microsoft.FSharp.Compiler.SourceCodeServices
 open System
 open System.Collections.Generic
 open System.IO
-open System.Text
 
 open Microsoft.FSharp.Core.Printf
 open Microsoft.FSharp.Compiler 
@@ -22,6 +21,7 @@ open Microsoft.FSharp.Compiler.AccessibilityLogic
 open Microsoft.FSharp.Compiler.Ast
 open Microsoft.FSharp.Compiler.ErrorLogger
 open Microsoft.FSharp.Compiler.Layout
+open Microsoft.FSharp.Compiler.Layout.TaggedTextOps
 open Microsoft.FSharp.Compiler.Lib
 open Microsoft.FSharp.Compiler.PrettyNaming
 open Microsoft.FSharp.Compiler.Range
@@ -31,10 +31,11 @@ open Microsoft.FSharp.Compiler.TcGlobals
 open Microsoft.FSharp.Compiler.Infos
 open Microsoft.FSharp.Compiler.NameResolution
 open Microsoft.FSharp.Compiler.InfoReader
-open Microsoft.FSharp.Compiler.SourceCodeServices.ItemDescriptionIcons 
+
+type internal Layout = layout
 
 module EnvMisc2 =
-    let maxMembers   = GetEnvInteger "FCS_MaxMembersInQuickInfo" 10
+    let maxMembers = GetEnvInteger "FCS_MaxMembersInQuickInfo" 10
 
     /// dataTipSpinWaitTime limits how long we block the UI thread while a tooltip pops up next to a selected item in an IntelliSense completion list.
     /// This time appears to be somewhat amortized by the time it takes the VS completion UI to actually bring up the tooltip after selecting an item in the first place.
@@ -59,24 +60,69 @@ type FSharpXmlDoc =
 
 /// A single data tip display element
 [<RequireQualifiedAccess>]
-type FSharpToolTipElement = 
+type FSharpToolTipElement<'T> = 
     | None
     /// A single type, method, etc with comment.
-    | Single of (* text *) string * FSharpXmlDoc
-    /// A single parameter, with the parameter name.
-    | SingleParameter of (* text *) string * FSharpXmlDoc * string
+    | Single of (* text *) 'T * FSharpXmlDoc
+    /// A single parameter, with the parameter name. 
+    | SingleParameter of (* text *) 'T * FSharpXmlDoc * string
     /// For example, a method overload group.
-    | Group of ((* text *) string * FSharpXmlDoc) list
+    | Group of ((* text *) 'T * FSharpXmlDoc) list
     /// An error occurred formatting this element
     | CompositionError of string
+
+/// A single data tip display element with where text is expressed as string
+type FSharpToolTipElement = FSharpToolTipElement<string>
+
+/// A single data tip display element with where text is expressed as <see cref="Layout"/>
+type internal FSharpStructuredToolTipElement = FSharpToolTipElement<Layout>
 
 /// Information for building a data tip box.
 //
 // Note: this type does not hold any handles to compiler data structure.
-type FSharpToolTipText = 
+type FSharpToolTipText<'T> = 
     /// A list of data tip elements to display.
-    | FSharpToolTipText of FSharpToolTipElement list  
+    | FSharpToolTipText of FSharpToolTipElement<'T> list  
 
+// specialization that stores data as strings
+type FSharpToolTipText = FSharpToolTipText<string>
+// specialization that stores data as <see cref="Layout"/>
+type internal FSharpStructuredToolTipText = FSharpToolTipText<Layout>
+
+module internal Tooltips =
+    let ToFSharpToolTipElement tooltip = 
+        match tooltip with
+        | FSharpStructuredToolTipElement.None -> FSharpToolTipElement.None
+        | FSharpStructuredToolTipElement.Single(text, doc) -> FSharpToolTipElement.Single(showL text, doc)
+        | FSharpStructuredToolTipElement.SingleParameter(t, doc, name) -> FSharpToolTipElement.SingleParameter(showL t, doc, name)
+        | FSharpStructuredToolTipElement.Group(l) -> FSharpToolTipElement.Group(l |> List.map(fun (text, doc) -> showL text, doc))
+        | FSharpStructuredToolTipElement.CompositionError(text) -> FSharpToolTipElement.CompositionError(text)
+
+    let ToFSharpToolTipText (FSharpStructuredToolTipText.FSharpToolTipText(text)) = 
+        FSharpToolTipText(List.map ToFSharpToolTipElement text)
+    
+    let Map f a = async.Bind(a, f >> async.Return)
+
+[<RequireQualifiedAccess>]
+type CompletionItemKind =
+    | Field
+    | Property
+    | Method of isExtension : bool
+    | Event
+    | Argument
+    | Other
+
+type UnresolvedSymbol =
+    { DisplayName: string
+      Namespace: string[] }
+
+type CompletionItem =
+    { Item: Item
+      Kind: CompletionItemKind
+      IsOwnMember: bool
+      MinorPriority: int
+      Type: TyconRef option
+      Unresolved: UnresolvedSymbol option }
 
 [<AutoOpen>]
 module internal ItemDescriptionsImpl = 
@@ -85,14 +131,14 @@ module internal ItemDescriptionsImpl =
         let _,tau = tryDestForallTy g typ
         isFunTy g tau 
 
-     
-    let OutputFullName isDecl ppF fnF os r = 
+    let OutputFullName isDecl ppF fnF r = 
       // Only display full names in quick info, not declaration text
       if not isDecl then 
         match ppF r with 
-        | None -> ()
+        | None -> emptyL
         | Some _ -> 
-            bprintf os "\n\n%s: %s" (FSComp.SR.typeInfoFullName()) (fnF r)
+            sepL (tagLineBreak "\n\n") ^^ wordL (tagText (FSComp.SR.typeInfoFullName())) ^^ RightL.colon ^^ (fnF r)
+      else emptyL
           
     let rangeOfValRef preferFlag (vref:ValRef) =
         match preferFlag with 
@@ -110,14 +156,14 @@ module internal ItemDescriptionsImpl =
     let rangeOfPropInfo preferFlag (pinfo:PropInfo) =
         match pinfo with
 #if EXTENSIONTYPING 
-        |   ProvidedProp(_,pi,_) -> definitionLocationOfProvidedItem pi
+        |   ProvidedProp(_,pi,_) -> ComputeDefinitionLocationOfProvidedItem pi
 #endif
         |   _ -> pinfo.ArbitraryValRef |> Option.map (rangeOfValRef preferFlag)
 
     let rangeOfMethInfo (g:TcGlobals) preferFlag (minfo:MethInfo) = 
         match minfo with
 #if EXTENSIONTYPING 
-        |   ProvidedMeth(_,mi,_,_) -> definitionLocationOfProvidedItem mi
+        |   ProvidedMeth(_,mi,_,_) -> ComputeDefinitionLocationOfProvidedItem mi
 #endif
         |   DefaultStructCtor(_, AppTy g (tcref, _)) -> Some(rangeOfEntityRef preferFlag tcref)
         |   _ -> minfo.ArbitraryValRef |> Option.map (rangeOfValRef preferFlag)
@@ -125,7 +171,7 @@ module internal ItemDescriptionsImpl =
     let rangeOfEventInfo preferFlag (einfo:EventInfo) = 
         match einfo with
 #if EXTENSIONTYPING 
-        | ProvidedEvent (_,ei,_) -> definitionLocationOfProvidedItem ei
+        | ProvidedEvent (_,ei,_) -> ComputeDefinitionLocationOfProvidedItem ei
 #endif
         | _ -> einfo.ArbitraryValRef |> Option.map (rangeOfValRef preferFlag)
       
@@ -180,7 +226,7 @@ module internal ItemDescriptionsImpl =
         | _ -> 
             minfo.ArbitraryValRef 
             |> Option.bind ccuOfValRef 
-            |> Option.orElse (fun () -> minfo.DeclaringEntityRef |> computeCcuOfTyconRef)
+            |> Option.orElseWith (fun () -> minfo.DeclaringEntityRef |> computeCcuOfTyconRef)
 
 
     let rec ccuOfItem (g:TcGlobals) d = 
@@ -196,7 +242,7 @@ module internal ItemDescriptionsImpl =
             pinfos |> List.tryPick (fun pinfo -> 
                 pinfo.ArbitraryValRef 
                 |> Option.bind ccuOfValRef
-                |> Option.orElse (fun () -> pinfo.EnclosingType |> tcrefOfAppTy g |> computeCcuOfTyconRef))
+                |> Option.orElseWith (fun () -> pinfo.EnclosingType |> tcrefOfAppTy g |> computeCcuOfTyconRef))
 
         | Item.ArgName (_,_,Some (ArgumentContainer.Method minfo))  -> ccuOfMethInfo g minfo
 
@@ -375,7 +421,7 @@ module internal ItemDescriptionsImpl =
         | _ -> None
 
     /// This function gets the signature to pass to Visual Studio to use its lookup functions for .NET stuff. 
-    let rec GetXmlDocHelpSigOfItemForLookup (infoReader:InfoReader) m d = 
+    let GetXmlDocHelpSigOfItemForLookup (infoReader:InfoReader) m d = 
         let g = infoReader.g
                 
         match d with
@@ -404,38 +450,42 @@ module internal ItemDescriptionsImpl =
             | ArgumentContainer.UnionCase ucinfo -> mkXmlComment (GetXmlDocSigOfUnionCaseInfo ucinfo)
         |  _ -> FSharpXmlDoc.None
 
-    /// Produce an XmlComment with a signature or raw text.
-    let GetXmlComment (xmlDoc:XmlDoc) (infoReader:InfoReader) m d = 
+    /// Produce an XmlComment with a signature or raw text, given the F# comment and the item
+    let GetXmlCommentForItemAux (xmlDoc:XmlDoc option) (infoReader:InfoReader) m d = 
         let result = 
             match xmlDoc with 
-            | XmlDoc [| |] -> ""
-            | XmlDoc l -> 
+            | None | Some (XmlDoc [| |]) -> ""
+            | Some (XmlDoc l) -> 
                 bufs (fun os -> 
                     bprintf os "\n"; 
                     l |> Array.iter (fun (s:string) -> 
                         // Note: this code runs for local/within-project xmldoc tooltips, but not for cross-project or .XML
                         bprintf os "\n%s" s))
 
-        let xml = if String.IsNullOrEmpty result then FSharpXmlDoc.None else FSharpXmlDoc.Text result
-        match xml with
-        | FSharpXmlDoc.None -> GetXmlDocHelpSigOfItemForLookup infoReader m d
-        | _ -> xml
+        if String.IsNullOrEmpty result then 
+            GetXmlDocHelpSigOfItemForLookup infoReader m d
+        else
+            FSharpXmlDoc.Text result
 
     let mutable ToolTipFault  = None
     
+    let GetXmlCommentForMethInfoItem infoReader m d (minfo: MethInfo) = 
+        GetXmlCommentForItemAux (if minfo.HasDirectXmlComment then Some minfo.XmlDoc else None) infoReader m d 
+
     /// Output a method info
-    let FormatOverloadsToList (infoReader:InfoReader) m denv d minfos : FSharpToolTipElement = 
-        let formatOne minfo = 
-            let text = bufs (fun os -> NicePrint.formatMethInfoToBufferFreeStyle  infoReader.amap m denv os minfo)
-            let xml = GetXmlComment (if minfo.HasDirectXmlComment then minfo.XmlDoc else XmlDoc [||]) infoReader m d 
-            text,xml
+    let FormatOverloadsToList (infoReader:InfoReader) m denv d minfos : FSharpStructuredToolTipElement = 
+        let layoutOne minfo = 
+            let layout = NicePrint.layoutMethInfoFreeStyle infoReader.amap m denv minfo
+            //let text = bufs (fun os -> NicePrint.formatMethInfoToBufferFreeStyle  infoReader.amap m denv os minfo)
+            let xml = GetXmlCommentForMethInfoItem infoReader m d minfo
+            layout,xml
 
         ToolTipFault |> Option.iter (fun msg -> 
            let exn = Error((0,msg),range.Zero)
-           let ph = PhasedError.Create(exn, BuildPhase.TypeCheck)
-           phasedError ph)
+           let ph = PhasedDiagnostic.Create(exn, BuildPhase.TypeCheck)
+           simulateError ph)
  
-        FSharpToolTipElement.Group(minfos |> List.map formatOne)
+        FSharpStructuredToolTipElement.Group(minfos |> List.map layoutOne)
 
         
     let pubpath_of_vref         (v:ValRef) = v.PublicPath        
@@ -449,7 +499,7 @@ module internal ItemDescriptionsImpl =
     // Like Seq.distinctBy but only filters out duplicates for some of the elements
     let partialDistinctBy (per:IPartialEqualityComparer<_>) seq =
         // Wrap a Wrap _ around all keys in case the key type is itself a type using null as a representation
-        let dict = new Dictionary<WrapType<'T>,obj>(per)
+        let dict = Dictionary<WrapType<'T>,obj>(per)
         seq |> List.filter (fun v -> 
             let v = Wrap(v)
             if (per.InEqualityRelation(v)) then 
@@ -488,6 +538,7 @@ module internal ItemDescriptionsImpl =
               | Wrap(Item.Event _) -> true
               | Wrap(Item.Property _) -> true
               | Wrap(Item.CtorGroup _) -> true
+              | Wrap(Item.UnqualifiedType _) -> true
               | _ -> false
               
           member x.Equals(item1, item2) = 
@@ -528,8 +579,13 @@ module internal ItemDescriptionsImpl =
                   List.zip pi1s pi2s |> List.forall(fun (pi1, pi2) -> PropInfo.PropInfosUseIdenticalDefinitions pi1 pi2)
               | Wrap(Item.Event(evt1)), Wrap(Item.Event(evt2)) -> EventInfo.EventInfosUseIdenticalDefintions evt1 evt2
               | Wrap(Item.CtorGroup(_, meths1)), Wrap(Item.CtorGroup(_, meths2)) -> 
-                  Seq.zip meths1 meths2 
-                  |> Seq.forall (fun (minfo1, minfo2) -> MethInfo.MethInfosUseIdenticalDefinitions minfo1 minfo2)
+                  List.zip meths1 meths2 
+                  |> List.forall (fun (minfo1, minfo2) -> MethInfo.MethInfosUseIdenticalDefinitions minfo1 minfo2)
+              | Wrap(Item.UnqualifiedType(tcRefs1)), Wrap(Item.UnqualifiedType(tcRefs2)) ->
+                  List.zip tcRefs1 tcRefs2
+                  |> List.forall (fun (tcRef1, tcRef2) -> tyconRefEq g tcRef1 tcRef2)
+              | Wrap(Item.Types(_,[TType.TType_app(tcRef1,_)])), Wrap(Item.UnqualifiedType([tcRef2])) -> tyconRefEq g tcRef1 tcRef2
+              | Wrap(Item.UnqualifiedType([tcRef1])), Wrap(Item.Types(_,[TType.TType_app(tcRef2,_)])) -> tyconRefEq g tcRef1 tcRef2
               | _ -> false)
               
           member x.GetHashCode item =
@@ -556,7 +612,24 @@ module internal ItemDescriptionsImpl =
               | Wrap(Item.RecdField(RecdFieldInfo(_, RFRef(tcref, n)))) -> hash(tcref.Stamp, n)
               | Wrap(Item.Event evt) -> evt.ComputeHashCode()
               | Wrap(Item.Property(_name, pis)) -> hash (pis |> List.map (fun pi -> pi.ComputeHashCode()))
+              | Wrap(Item.UnqualifiedType(tcRef :: _)) -> hash tcRef.Stamp
               | _ -> failwith "unreachable") }
+
+    let CompletionItemDisplayPartialEquality g = 
+        let itemComparer = ItemDisplayPartialEquality g
+  
+        { new IPartialEqualityComparer<WrapType<CompletionItem>> with
+            member x.InEqualityRelation (Wrap item) = itemComparer.InEqualityRelation (Wrap item.Item)
+            member x.Equals(Wrap item1, Wrap item2) = itemComparer.Equals(Wrap item1.Item, Wrap item2.Item)
+            member x.GetHashCode (Wrap item) = itemComparer.GetHashCode(Wrap item.Item) }
+
+    let ItemWithTypeDisplayPartialEquality g = 
+        let itemComparer = ItemDisplayPartialEquality g
+        
+        { new IPartialEqualityComparer<WrapType<Item * _>> with
+            member x.InEqualityRelation (Wrap (item, _)) = itemComparer.InEqualityRelation (Wrap item)
+            member x.Equals(Wrap (item1, _), Wrap (item2, _)) = itemComparer.Equals(Wrap item1, Wrap item2)
+            member x.GetHashCode (Wrap (item, _)) = itemComparer.GetHashCode(Wrap item) }
     
     // Remove items containing the same module references
     let RemoveDuplicateModuleRefs modrefs  = 
@@ -568,27 +641,46 @@ module internal ItemDescriptionsImpl =
 
     /// Remove all duplicate items
     let RemoveDuplicateItems g items = 
-        items |> partialDistinctBy (ItemDisplayPartialEquality g) 
+        items |> partialDistinctBy (ItemDisplayPartialEquality g)
 
-    /// Filter types that are explicitly suppressed from the IntelliSense (such as uppercase "FSharpList", "Option", etc.)
-    let RemoveExplicitlySuppressed g items = 
-      items |> List.filter (fun item ->
+    /// Remove all duplicate items
+    let RemoveDuplicateItemsWithType g (items: (Item * TType option) list) = 
+        items |> partialDistinctBy (ItemWithTypeDisplayPartialEquality g) 
+
+    /// Remove all duplicate items
+    let RemoveDuplicateCompletionItems g items = 
+        items |> partialDistinctBy (CompletionItemDisplayPartialEquality g) 
+
+    let IsExplicitlySuppressed (g: TcGlobals) (item: Item) = 
         // This may explore assemblies that are not in the reference set.
         // In this case just assume the item is not suppressed.
         protectAssemblyExploration true (fun () -> 
          match item with 
          | Item.Types(it, [ty]) -> 
-             g.suppressed_types |> List.forall (fun supp -> 
+             g.suppressed_types 
+             |> List.exists (fun supp -> 
                 if isAppTy g ty then 
                   // check if they are the same logical type (after removing all abbreviations)
                   let tcr1 = tcrefOfAppTy g ty
                   let tcr2 = tcrefOfAppTy g (generalizedTyconRef supp) 
-                  not(tyconRefEq g tcr1 tcr2 && 
-                      // check the display name is precisely the one we're suppressing
-                      it = supp.DisplayName)
-                else true ) 
-         | _ -> true ))
-    
+                  tyconRefEq g tcr1 tcr2 && 
+                  // check the display name is precisely the one we're suppressing
+                  it = supp.DisplayName
+                else false) 
+         | _ -> false)
+
+    /// Filter types that are explicitly suppressed from the IntelliSense (such as uppercase "FSharpList", "Option", etc.)
+    let RemoveExplicitlySuppressed (g: TcGlobals) (items: Item list) = 
+      items |> List.filter (fun item -> not (IsExplicitlySuppressed g item))
+
+    /// Filter types that are explicitly suppressed from the IntelliSense (such as uppercase "FSharpList", "Option", etc.)
+    let RemoveExplicitlySuppressedCompletionItems (g: TcGlobals) (items: CompletionItem list) = 
+      items |> List.filter (fun item -> not (IsExplicitlySuppressed g item.Item))
+
+    /// Filter types that are explicitly suppressed from the IntelliSense (such as uppercase "FSharpList", "Option", etc.)
+    let RemoveExplicitlySuppressedItemsWithType (g: TcGlobals) (items: (Item * TType option) list) = 
+      items |> List.filter (fun (item, _) -> not (IsExplicitlySuppressed g item))
+
     let SimplerDisplayEnv denv _isDecl = 
         { denv with suppressInlineKeyword=true; 
                     shortConstraints=true; 
@@ -597,9 +689,9 @@ module internal ItemDescriptionsImpl =
                     suppressNestedTypes=true;
                     maxMembers=Some EnvMisc2.maxMembers }
 
-    let rec FullNameOfItem g d = 
+    let rec FullNameOfItem g item = 
         let denv = DisplayEnv.Empty(g)
-        match d with
+        match item with
         | Item.ImplicitOp(_, { contents = Some(TraitConstraintSln.FSMethSln(_, vref, _)) }) 
         | Item.Value vref | Item.CustomBuilder (_,vref) -> fullDisplayTextOfValRef vref
         | Item.UnionCase (ucinfo,_) -> fullDisplayTextOfUnionCaseRef  ucinfo.UnionCaseRef
@@ -618,7 +710,10 @@ module internal ItemDescriptionsImpl =
         | Item.UnqualifiedType (tcref :: _) -> bufs (fun os -> NicePrint.outputTyconRef denv os tcref)
         | Item.FakeInterfaceCtor typ 
         | Item.DelegateCtor typ 
-        | Item.Types(_,typ:: _) -> bufs (fun os -> NicePrint.outputTyconRef denv os (tcrefOfAppTy g typ))
+        | Item.Types(_,typ:: _) -> 
+            match tryDestAppTy g typ with
+            | Some tcref -> bufs (fun os -> NicePrint.outputTyconRef denv os tcref)
+            | _ -> ""
         | Item.ModuleOrNamespaces((modref :: _) as modrefs) -> 
             let definiteNamespace = modrefs |> List.forall (fun modref -> modref.IsNamespace)
             if definiteNamespace then fullDisplayTextOfModRef modref else modref.DemangledModuleOrNamespaceName
@@ -635,146 +730,205 @@ module internal ItemDescriptionsImpl =
         | Item.Property(_,[]) -> ""
 
     /// Output a the description of a language item
+    let rec GetXmlCommentForItem (infoReader:InfoReader) m d = 
+        let g = infoReader.g
+        match d with
+        | Item.ImplicitOp(_, { contents = Some(TraitConstraintSln.FSMethSln(_, vref, _)) }) -> 
+            GetXmlCommentForItem infoReader m (Item.Value vref)
+
+        | Item.Value vref | Item.CustomBuilder (_,vref) ->            
+            GetXmlCommentForItemAux (if valRefInThisAssembly g.compilingFslib vref then Some vref.XmlDoc else None) infoReader m d 
+
+        | Item.UnionCase(ucinfo,_) -> 
+            GetXmlCommentForItemAux (if tyconRefUsesLocalXmlDoc g.compilingFslib ucinfo.TyconRef then Some ucinfo.UnionCase .XmlDoc else None) infoReader m d 
+
+        | Item.ActivePatternCase apref -> 
+            GetXmlCommentForItemAux (Some apref.ActivePatternVal.XmlDoc) infoReader m d 
+
+        | Item.ExnCase ecref -> 
+            GetXmlCommentForItemAux (if tyconRefUsesLocalXmlDoc g.compilingFslib ecref then Some ecref.XmlDoc else None) infoReader m d 
+
+        | Item.RecdField rfinfo ->
+            GetXmlCommentForItemAux (if tyconRefUsesLocalXmlDoc g.compilingFslib rfinfo.TyconRef then Some rfinfo.RecdField.XmlDoc else None) infoReader m d 
+
+        | Item.Event einfo ->
+            GetXmlCommentForItemAux (if einfo.HasDirectXmlComment  then Some einfo.XmlDoc else None) infoReader m d 
+
+        | Item.Property(_,pinfos) -> 
+            let pinfo = pinfos.Head
+            GetXmlCommentForItemAux (if pinfo.HasDirectXmlComment then Some pinfo.XmlDoc else None) infoReader m d 
+
+        | Item.CustomOperation (_,_,Some minfo) 
+        | Item.CtorGroup(_,minfo :: _) 
+        | Item.MethodGroup(_,minfo :: _,_) ->
+            GetXmlCommentForMethInfoItem infoReader m d minfo
+
+        | Item.Types(_,((TType_app(tcref,_)):: _)) -> 
+            GetXmlCommentForItemAux (if tyconRefUsesLocalXmlDoc g.compilingFslib tcref then Some tcref.XmlDoc else None) infoReader m d 
+
+        | Item.ModuleOrNamespaces((modref :: _) as modrefs) -> 
+            let definiteNamespace = modrefs |> List.forall (fun modref -> modref.IsNamespace)
+            if not definiteNamespace then
+                GetXmlCommentForItemAux (if entityRefInThisAssembly g.compilingFslib modref then Some modref.XmlDoc else None) infoReader m d 
+            else
+                GetXmlCommentForItemAux None infoReader m d
+
+        | Item.ArgName (_, _, argContainer) -> 
+            let xmldoc = 
+                match argContainer with
+                | Some(ArgumentContainer.Method (minfo)) ->
+                    if minfo.HasDirectXmlComment then Some minfo.XmlDoc else None 
+                | Some(ArgumentContainer.Type(tcref)) ->
+                    if (tyconRefUsesLocalXmlDoc g.compilingFslib tcref) then Some tcref.XmlDoc else None
+                | Some(ArgumentContainer.UnionCase(ucinfo)) ->
+                    if (tyconRefUsesLocalXmlDoc g.compilingFslib ucinfo.TyconRef) then Some ucinfo.UnionCase.XmlDoc else None
+                | _ -> None
+            GetXmlCommentForItemAux xmldoc infoReader m d
+
+        | Item.SetterArg (_, item) -> 
+            GetXmlCommentForItem infoReader m item
+        
+        // In all these cases, there is no direct XML documentation from F# comments
+        | Item.ActivePatternResult _ 
+        | Item.NewDef _
+        | Item.ILField _
+        | Item.FakeInterfaceCtor _
+        | Item.DelegateCtor _
+        |  _ -> 
+            GetXmlCommentForItemAux None infoReader m d
+
+    let IsAttribute (infoReader: InfoReader) d =
+        try
+            let g = infoReader.g
+            let amap = infoReader.amap
+            match d with
+            | Item.Types(_,((TType_app(tcref,_)):: _)) -> 
+                let ty = generalizedTyconRef tcref
+                Infos.ExistsHeadTypeInEntireHierarchy g amap range0 ty g.tcref_System_Attribute
+            | _ -> false
+        with _ -> false
+
+    /// Output the description of a language item
     let rec FormatItemDescriptionToToolTipElement isDecl (infoReader:InfoReader) m denv d = 
         let g = infoReader.g
         let amap = infoReader.amap
         let denv = SimplerDisplayEnv denv isDecl 
+        let xml = GetXmlCommentForItem infoReader m d 
         match d with
         | Item.ImplicitOp(_, { contents = Some(TraitConstraintSln.FSMethSln(_, vref, _)) }) -> 
             // operator with solution
             FormatItemDescriptionToToolTipElement isDecl infoReader m denv (Item.Value vref)
         | Item.Value vref | Item.CustomBuilder (_,vref) ->            
-            let text = 
-                bufs (fun os -> 
-                    NicePrint.outputQualifiedValOrMember denv os vref.Deref 
-                    OutputFullName isDecl pubpath_of_vref fullDisplayTextOfValRef os vref)
+            let layout = 
+                NicePrint.layoutQualifiedValOrMember denv vref.Deref ^^
+                OutputFullName isDecl pubpath_of_vref fullDisplayTextOfValRefAsLayout vref
 
-            let xml = GetXmlComment (if (valRefInThisAssembly g.compilingFslib vref) then vref.XmlDoc else XmlDoc [||]) infoReader m d 
-            FSharpToolTipElement.Single(text, xml)
+            FSharpStructuredToolTipElement.Single(layout, xml)
 
         // Union tags (constructors)
         | Item.UnionCase(ucinfo,_) -> 
             let uc = ucinfo.UnionCase 
             let rty = generalizedTyconRef ucinfo.TyconRef
             let recd = uc.RecdFields 
-            let text = 
-                bufs (fun os -> 
-                    bprintf os "%s "  (FSComp.SR.typeInfoUnionCase())
-                    NicePrint.outputTyconRef denv os ucinfo.TyconRef
-                    bprintf os ".%s: "  
-                        (DecompileOpName uc.Id.idText) 
-                    if not (List.isEmpty recd) then
-                        NicePrint.outputUnionCases denv os recd
-                        os.Append (" -> ") |> ignore
-                    NicePrint.outputTy denv os rty )
-
-
-            let xml = GetXmlComment (if (tyconRefUsesLocalXmlDoc g.compilingFslib ucinfo.TyconRef) then uc.XmlDoc else XmlDoc [||]) infoReader m d 
-            FSharpToolTipElement.Single(text, xml)
+            let layout = 
+                wordL (tagText (FSComp.SR.typeInfoUnionCase())) ^^
+                NicePrint.layoutTyconRef denv ucinfo.TyconRef ^^
+                sepL (tagPunctuation ".") ^^
+                wordL (tagUnionCase (DecompileOpName uc.Id.idText) |> mkNav uc.DefinitionRange) ^^
+                RightL.colon ^^
+                (if List.isEmpty recd then emptyL else NicePrint.layoutUnionCases denv recd ^^ WordL.arrow) ^^
+                NicePrint.layoutTy denv rty
+            FSharpStructuredToolTipElement.Single(layout, xml)
 
         // Active pattern tag inside the declaration (result)             
         | Item.ActivePatternResult(apinfo, ty, idx, _) ->
             let items = apinfo.ActiveTags
-            let text = bufs (fun os -> 
-                bprintf os "%s %s: " (FSComp.SR.typeInfoActivePatternResult()) (List.item idx items) 
-                NicePrint.outputTy denv os ty)
-            let xml = GetXmlComment (XmlDoc [||]) infoReader m d
-            FSharpToolTipElement.Single(text, xml)
+            let layout = 
+                wordL (tagText ((FSComp.SR.typeInfoActivePatternResult()))) ^^
+                wordL (tagActivePatternResult (List.item idx items) |> mkNav apinfo.Range) ^^
+                RightL.colon ^^
+                NicePrint.layoutTy denv ty
+            FSharpStructuredToolTipElement.Single(layout, xml)
 
         // Active pattern tags 
-        // XmlDoc is never emitted to xml doc files for these
         | Item.ActivePatternCase apref -> 
             let v = apref.ActivePatternVal
             // Format the type parameters to get e.g. ('a -> 'a) rather than ('?1234 -> '?1234)
             let _,tau = v.TypeScheme
             // REVIEW: use _cxs here
             let _, ptau, _cxs = PrettyTypes.PrettifyTypes1 denv.g tau
-            let text = 
-                bufs (fun os -> 
-                    bprintf os "%s %s: " (FSComp.SR.typeInfoActiveRecognizer())
-                        apref.Name
-                    NicePrint.outputTy denv os ptau 
-                    OutputFullName isDecl pubpath_of_vref fullDisplayTextOfValRef os v)
-
-            let xml = GetXmlComment v.XmlDoc infoReader m d 
-            FSharpToolTipElement.Single(text, xml)
+            let layout =
+                wordL (tagText (FSComp.SR.typeInfoActiveRecognizer())) ^^
+                wordL (tagActivePatternCase apref.Name |> mkNav v.DefinitionRange) ^^
+                RightL.colon ^^
+                NicePrint.layoutTy denv ptau ^^
+                OutputFullName isDecl pubpath_of_vref fullDisplayTextOfValRefAsLayout v
+            FSharpStructuredToolTipElement.Single(layout, xml)
 
         // F# exception names
         | Item.ExnCase ecref -> 
-            let text =  bufs (fun os -> 
-                NicePrint.outputExnDef denv os ecref.Deref 
-                OutputFullName isDecl pubpath_of_tcref fullDisplayTextOfExnRef os ecref)
-            let xml = GetXmlComment (if (tyconRefUsesLocalXmlDoc g.compilingFslib ecref) then ecref.XmlDoc else XmlDoc [||]) infoReader m d 
-            FSharpToolTipElement.Single(text, xml)
+            let layout =
+                NicePrint.layoutExnDef denv ecref.Deref ^^
+                OutputFullName isDecl pubpath_of_tcref fullDisplayTextOfExnRefAsLayout ecref
+            FSharpStructuredToolTipElement.Single(layout, xml)
 
         // F# record field names
         | Item.RecdField rfinfo ->
             let rfield = rfinfo.RecdField
             let _, ty, _cxs = PrettyTypes.PrettifyTypes1 g rfinfo.FieldType
-            let text = 
-                bufs (fun os -> 
-                    NicePrint.outputTyconRef denv os rfinfo.TyconRef
-                    bprintf os ".%s: "  
-                        (DecompileOpName rfield.Name) 
-                    NicePrint.outputTy denv os ty;
-                    match rfinfo.LiteralValue with 
-                    | None -> ()
-                    | Some lit -> 
-                       try bprintf os " = %s" (Layout.showL ( NicePrint.layoutConst denv.g ty lit )) with _ -> ())
-
-            let xml = GetXmlComment (if (tyconRefUsesLocalXmlDoc g.compilingFslib rfinfo.TyconRef) then rfield.XmlDoc else XmlDoc [||]) infoReader m d 
-            FSharpToolTipElement.Single(text, xml)
+            let layout = 
+                NicePrint.layoutTyconRef denv rfinfo.TyconRef ^^
+                SepL.dot ^^
+                wordL (tagRecordField (DecompileOpName rfield.Name) |> mkNav rfield.DefinitionRange) ^^
+                RightL.colon ^^
+                NicePrint.layoutTy denv ty ^^
+                (
+                    match rfinfo.LiteralValue with
+                    | None -> emptyL
+                    | Some lit -> try WordL.equals ^^  NicePrint.layoutConst denv.g ty lit with _ -> emptyL
+                )
+            FSharpStructuredToolTipElement.Single(layout, xml)
 
         // Not used
         | Item.NewDef id -> 
-            let dataTip = bufs (fun os -> bprintf os "%s %s" (FSComp.SR.typeInfoPatternVariable()) id.idText)
-            FSharpToolTipElement.Single(dataTip, GetXmlComment (XmlDoc [||]) infoReader m d)
+            let layout = 
+                wordL (tagText (FSComp.SR.typeInfoPatternVariable())) ^^
+                wordL (tagUnknownEntity id.idText)
+            FSharpStructuredToolTipElement.Single(layout, xml)
 
         // .NET fields
         | Item.ILField finfo ->
-            let dataTip = bufs (fun os -> 
-                bprintf os "%s " (FSComp.SR.typeInfoField()) 
-                NicePrint.outputILTypeRef denv os finfo.ILTypeRef
-                bprintf os ".%s" finfo.FieldName;
-                match finfo.LiteralValue with 
-                | None -> ()
-                | Some v -> 
-                   try bprintf os " = %s" (Layout.showL ( NicePrint.layoutConst denv.g (finfo.FieldType(infoReader.amap, m)) (TypeChecker.TcFieldInit m v) )) 
-                   with _ -> ())
-            FSharpToolTipElement.Single(dataTip, GetXmlComment (XmlDoc [||]) infoReader m d)
+            let layout = 
+                wordL (tagText (FSComp.SR.typeInfoField())) ^^
+                NicePrint.layoutILTypeRef denv finfo.ILTypeRef ^^
+                SepL.dot ^^
+                wordL (tagField finfo.FieldName) ^^
+                (
+                    match finfo.LiteralValue with
+                    | None -> emptyL
+                    | Some v ->
+                        WordL.equals ^^
+                        try NicePrint.layoutConst denv.g (finfo.FieldType(infoReader.amap, m)) (TypeChecker.TcFieldInit m v) with _ -> emptyL
+                )
+            FSharpStructuredToolTipElement.Single(layout, xml)
 
         // .NET events
         | Item.Event einfo ->
             let rty = PropTypOfEventInfo infoReader m AccessibleFromSomewhere einfo
             let _,rty, _cxs = PrettyTypes.PrettifyTypes1 g rty
-            let text = 
-                bufs (fun os -> 
-                    // REVIEW: use _cxs here
-                    bprintf os "%s " (FSComp.SR.typeInfoEvent()) 
-                    NicePrint.outputTyconRef denv os (tcrefOfAppTy g einfo.EnclosingType) 
-                    bprintf os ".%s: " einfo.EventName
-                    NicePrint.outputTy denv os rty)
-
-            let xml = GetXmlComment (if einfo.HasDirectXmlComment  then einfo.XmlDoc else XmlDoc [||]) infoReader m d 
-
-            FSharpToolTipElement.Single(text, xml)
+            let layout =
+                wordL (tagText (FSComp.SR.typeInfoEvent())) ^^
+                NicePrint.layoutTyconRef denv (tcrefOfAppTy g einfo.EnclosingType) ^^
+                SepL.dot ^^
+                wordL (tagEvent einfo.EventName) ^^
+                RightL.colon ^^
+                NicePrint.layoutTy denv rty
+            FSharpStructuredToolTipElement.Single(layout, xml)
 
         // F# and .NET properties
-        | Item.Property(_,pinfos) -> 
-            let pinfo = pinfos.Head
-            let rty = pinfo.GetPropertyType(amap,m) 
-            let rty = if pinfo.IsIndexer then mkRefTupledTy g (pinfo.GetParamTypes(amap, m)) --> rty else  rty 
-            let _, rty, _ = PrettyTypes.PrettifyTypes1 g rty
-            let text =
-                bufs (fun os -> 
-                    bprintf os "%s " (FSComp.SR.typeInfoProperty())
-                    NicePrint.outputTyconRef denv os (tcrefOfAppTy g pinfo.EnclosingType)
-                    bprintf os ".%s: " pinfo.PropertyName  
-                    NicePrint.outputTy denv os rty)
-
-            let xml = GetXmlComment (if pinfo.HasDirectXmlComment then pinfo.XmlDoc else XmlDoc [||]) infoReader m d 
-
-            FSharpToolTipElement.Single(text, xml)
+        | Item.Property(_, pinfo :: _) -> 
+            let layout = NicePrint.layoutPropInfoToFreeStyle g amap m denv pinfo
+            FSharpStructuredToolTipElement.Single(layout, xml)
 
         // Custom operations in queries
         | Item.CustomOperation (customOpName,usageText,Some minfo) -> 
@@ -782,30 +936,24 @@ module internal ItemDescriptionsImpl =
             // Build 'custom operation: where (bool)
             //        
             //        Calls QueryBuilder.Where'
-            let text =
-                bufs (fun os -> 
-                    bprintf os "%s: " (FSComp.SR.typeInfoCustomOperation()) 
-                    match usageText() with 
-                    | Some t -> 
-                        bprintf os "%s" t
-                    | None -> 
+            let layout = 
+                wordL (tagText (FSComp.SR.typeInfoCustomOperation())) ^^
+                RightL.colon ^^
+                (
+                    match usageText() with
+                    | Some t -> wordL (tagText t)
+                    | None ->
                         let argTys = ParamNameAndTypesOfUnaryCustomOperation g minfo |> List.map (fun (ParamNameAndType(_,ty)) -> ty)
                         let _, argTys, _ = PrettyTypes.PrettifyTypesN g argTys 
+                        wordL (tagMethod customOpName) ^^ sepListL SepL.space (List.map (fun ty -> LeftL.leftParen ^^ NicePrint.layoutTy denv ty ^^ SepL.rightParen) argTys)
+                ) ^^
+                SepL.lineBreak ^^ SepL.lineBreak  ^^
+                wordL (tagText (FSComp.SR.typeInfoCallsWord())) ^^
+                NicePrint.layoutTyconRef denv (tcrefOfAppTy g minfo.EnclosingType) ^^
+                SepL.dot ^^
+                wordL (tagMethod minfo.DisplayName)
 
-                        bprintf os "%s" customOpName
-                        for argTy in argTys do
-                            bprintf os " ("
-                            NicePrint.outputTy denv os argTy
-                            bprintf os ")" 
-                    bprintf os "\n\n%s "
-                        (FSComp.SR.typeInfoCallsWord()) 
-                    NicePrint.outputTyconRef denv os (tcrefOfAppTy g minfo.EnclosingType)
-                    bprintf os ".%s " 
-                        minfo.DisplayName)
-
-            let xml = GetXmlComment (if minfo.HasDirectXmlComment then minfo.XmlDoc else XmlDoc [||]) infoReader m d 
-
-            FSharpToolTipElement.Single(text, xml)
+            FSharpStructuredToolTipElement.Single(layout, xml)
 
         // F# constructors and methods
         | Item.CtorGroup(_,minfos) 
@@ -819,42 +967,43 @@ module internal ItemDescriptionsImpl =
         // and in that case we'll just show the interface type name.
         | Item.FakeInterfaceCtor typ ->
            let _, typ, _ = PrettyTypes.PrettifyTypes1 g typ
-           let text = bufs (fun os -> NicePrint.outputTyconRef denv os (tcrefOfAppTy g typ))
-           FSharpToolTipElement.Single(text, GetXmlComment (XmlDoc [||]) infoReader m d)
+           let layout = NicePrint.layoutTyconRef denv (tcrefOfAppTy g typ)
+           FSharpStructuredToolTipElement.Single(layout, xml)
         
         // The 'fake' representation of constructors of .NET delegate types
         | Item.DelegateCtor delty -> 
            let _, delty, _cxs = PrettyTypes.PrettifyTypes1 g delty
            let (SigOfFunctionForDelegate(_, _, _, fty)) = GetSigOfFunctionForDelegate infoReader delty m AccessibleFromSomewhere
-           let text = bufs (fun os -> 
-                         NicePrint.outputTyconRef denv os (tcrefOfAppTy g delty)
-                         bprintf os "("
-                         NicePrint.outputTy denv os fty
-                         bprintf os ")")
-           let xml = GetXmlComment (XmlDoc [||]) infoReader m d
-           FSharpToolTipElement.Single(text, xml)
+           let layout =
+               NicePrint.layoutTyconRef denv (tcrefOfAppTy g delty) ^^
+               LeftL.leftParen ^^
+               NicePrint.layoutTy denv fty ^^
+               RightL.rightParen
+           FSharpStructuredToolTipElement.Single(layout, xml)
 
         // Types.
         | Item.Types(_,((TType_app(tcref,_)):: _)) -> 
-            let text = 
-                bufs (fun os -> 
-                    let denv = { denv with shortTypeNames = true  }
-                    NicePrint.outputTycon denv infoReader AccessibleFromSomewhere m (* width *) os tcref.Deref
-                    OutputFullName isDecl pubpath_of_tcref fullDisplayTextOfTyconRef os tcref)
-  
-            let xml = GetXmlComment (if (tyconRefUsesLocalXmlDoc g.compilingFslib tcref) then tcref.XmlDoc else XmlDoc [||]) infoReader m d 
-            FSharpToolTipElement.Single(text, xml)
+            let denv = { denv with shortTypeNames = true  }
+            let layout =
+                NicePrint.layoutTycon denv infoReader AccessibleFromSomewhere m (* width *) tcref.Deref ^^
+                OutputFullName isDecl pubpath_of_tcref fullDisplayTextOfTyconRefAsLayout tcref
+            FSharpStructuredToolTipElement.Single(layout, xml)
 
         // F# Modules and namespaces
         | Item.ModuleOrNamespaces((modref :: _) as modrefs) -> 
-            let os = StringBuilder()
+            //let os = StringBuilder()
             let modrefs = modrefs |> RemoveDuplicateModuleRefs
             let definiteNamespace = modrefs |> List.forall (fun modref -> modref.IsNamespace)
             let kind = 
                 if definiteNamespace then FSComp.SR.typeInfoNamespace()
                 elif modrefs |> List.forall (fun modref -> modref.IsModule) then FSComp.SR.typeInfoModule()
                 else FSComp.SR.typeInfoNamespaceOrModule()
-            bprintf os "%s %s" kind (if definiteNamespace then fullDisplayTextOfModRef modref else modref.DemangledModuleOrNamespaceName)
+            
+            let layout = 
+                wordL (tagKeyword kind) ^^
+                (if definiteNamespace then tagNamespace (fullDisplayTextOfModRef modref) else (tagModule modref.DemangledModuleOrNamespaceName)
+                 |> mkNav modref.DefinitionRange
+                 |> wordL)
             if not definiteNamespace then
                 let namesToAdd = 
                     ([],modrefs) 
@@ -864,41 +1013,41 @@ module internal ItemDescriptionsImpl =
                         | _ -> st) 
                     |> Seq.mapi (fun i x -> i,x) 
                     |> Seq.toList
-                if not (List.isEmpty namesToAdd) then 
-                    bprintf os "\n"
-                for i, txt in namesToAdd do
-                    bprintf os "\n%s" ((if i = 0 then FSComp.SR.typeInfoFromFirst else FSComp.SR.typeInfoFromNext) txt)
-                let xml = GetXmlComment (if (entityRefInThisAssembly g.compilingFslib modref) then modref.XmlDoc else XmlDoc [||]) infoReader m d 
-                FSharpToolTipElement.Single(os.ToString(), xml)
+                let layout =
+                    layout ^^
+                    (
+                        if not (List.isEmpty namesToAdd) then
+                            SepL.lineBreak ^^
+                            List.fold ( fun s (i, txt) ->
+                                s ^^
+                                SepL.lineBreak ^^
+                                wordL (tagText ((if i = 0 then FSComp.SR.typeInfoFromFirst else FSComp.SR.typeInfoFromNext) txt))
+                            ) emptyL namesToAdd 
+                        else 
+                            emptyL
+                    )
+                FSharpStructuredToolTipElement.Single(layout, xml)
             else
-                FSharpToolTipElement.Single(os.ToString(), GetXmlComment (XmlDoc [||]) infoReader m d)
+                FSharpStructuredToolTipElement.Single(layout, xml)
 
         // Named parameters
-        | Item.ArgName (id, argTy, argContainer) -> 
+        | Item.ArgName (id, argTy, _) -> 
             let _, argTy, _ = PrettyTypes.PrettifyTypes1 g argTy
-            let text = bufs (fun os -> 
-                          bprintf os "%s %s : " (FSComp.SR.typeInfoArgument()) id.idText 
-                          NicePrint.outputTy denv os argTy)
-
-            let xmldoc = match argContainer with
-                         | Some(ArgumentContainer.Method (minfo)) ->
-                               if minfo.HasDirectXmlComment then minfo.XmlDoc else XmlDoc [||] 
-                         | Some(ArgumentContainer.Type(tcref)) ->
-                               if (tyconRefUsesLocalXmlDoc g.compilingFslib tcref) then tcref.XmlDoc else XmlDoc [||]
-                         | Some(ArgumentContainer.UnionCase(ucinfo)) ->
-                               if (tyconRefUsesLocalXmlDoc g.compilingFslib ucinfo.TyconRef) then ucinfo.UnionCase.XmlDoc else XmlDoc [||]
-                         | _ -> XmlDoc [||]
-            let xml = GetXmlComment xmldoc infoReader m d
-            FSharpToolTipElement.SingleParameter(text, xml, id.idText)
+            let layout =
+                wordL (tagText (FSComp.SR.typeInfoArgument())) ^^
+                wordL (tagParameter id.idText) ^^
+                RightL.colon ^^
+                NicePrint.layoutTy denv argTy
+            FSharpStructuredToolTipElement.SingleParameter(layout, xml, id.idText)
             
         | Item.SetterArg (_, item) -> 
             FormatItemDescriptionToToolTipElement isDecl infoReader m denv item
         |  _ -> 
-            FSharpToolTipElement.None
+            FSharpStructuredToolTipElement.None
 
 
     // Format the return type of an item
-    let rec FormatItemReturnTypeToBuffer (infoReader:InfoReader) m denv os d = 
+    let rec FormatItemReturnTypeAsLayout (infoReader:InfoReader) m denv d = 
         let isDecl = false
         let g = infoReader.g
         let amap = infoReader.amap
@@ -911,15 +1060,12 @@ module internal ItemDescriptionsImpl =
               let dtau,rtau = destFunTy g tau
               let ptausL,tpcsL = NicePrint.layoutPrettifiedTypes denv [dtau;rtau]
               let _,prtauL = List.frontAndBack ptausL
-              bprintf os ": "
-              bufferL os prtauL
-              bprintf os " "
-              bufferL os tpcsL
+              RightL.colon ^^ prtauL ^^ SepL.space ^^ tpcsL
             else
-              bufferL os (NicePrint.layoutPrettifiedTypeAndConstraints denv [] tau) 
+              NicePrint.layoutPrettifiedTypeAndConstraints denv [] tau
         | Item.UnionCase(ucinfo,_) -> 
             let rty = generalizedTyconRef ucinfo.TyconRef
-            NicePrint.outputTy denv os rty
+            NicePrint.layoutTy denv rty
         | Item.ActivePatternCase(apref) -> 
             let v = apref.ActivePatternVal
             let _, tau = v.TypeScheme
@@ -929,31 +1075,30 @@ module internal ItemDescriptionsImpl =
             let aparity = apnames.Length
             
             let rty = if aparity <= 1 then res else List.item apref.CaseIndex (argsOfAppTy g res)
-            NicePrint.outputTy denv os rty
+            NicePrint.layoutTy denv rty
         | Item.ExnCase _ -> 
-            bufferL os (NicePrint.layoutPrettifiedTypeAndConstraints denv [] g.exn_ty) 
+            NicePrint.layoutPrettifiedTypeAndConstraints denv [] g.exn_ty
         | Item.RecdField(rfinfo) ->
-            bufferL os (NicePrint.layoutPrettifiedTypeAndConstraints denv [] rfinfo.FieldType);
+            NicePrint.layoutPrettifiedTypeAndConstraints denv [] rfinfo.FieldType
         | Item.ILField(finfo) ->
-            bufferL os (NicePrint.layoutPrettifiedTypeAndConstraints denv [] (finfo.FieldType(amap,m)))
+            NicePrint.layoutPrettifiedTypeAndConstraints denv [] (finfo.FieldType(amap,m))
         | Item.Event(einfo) ->
-            bufferL os (NicePrint.layoutPrettifiedTypeAndConstraints denv [] (PropTypOfEventInfo infoReader m AccessibleFromSomewhere einfo))
+            NicePrint.layoutPrettifiedTypeAndConstraints denv [] (PropTypOfEventInfo infoReader m AccessibleFromSomewhere einfo)
         | Item.Property(_,pinfos) -> 
             let pinfo = List.head pinfos
             let rty = pinfo.GetPropertyType(amap,m) 
-            let layout = (NicePrint.layoutPrettifiedTypeAndConstraints denv [] rty)
-            bufferL os layout
+            NicePrint.layoutPrettifiedTypeAndConstraints denv [] rty
         | Item.CustomOperation (_,_,Some minfo)
         | Item.MethodGroup(_,(minfo :: _),_) 
         | Item.CtorGroup(_,(minfo :: _)) -> 
             let rty = minfo.GetFSharpReturnTy(amap, m, minfo.FormalMethodInst)
-            bufferL os (NicePrint.layoutPrettifiedTypeAndConstraints denv [] rty) 
+            NicePrint.layoutPrettifiedTypeAndConstraints denv [] rty
         | Item.FakeInterfaceCtor typ 
         | Item.DelegateCtor typ -> 
-           bufferL os (NicePrint.layoutPrettifiedTypeAndConstraints denv [] typ) 
-        | Item.TypeVar _ -> ()
+           NicePrint.layoutPrettifiedTypeAndConstraints denv [] typ
+        | Item.TypeVar _ -> emptyL
             
-        | _ -> ()
+        | _ -> emptyL
 
     let rec GetF1Keyword d : string option = 
         let rec unwindTypeAbbrev (tcref : TyconRef) =
@@ -1116,125 +1261,155 @@ module internal ItemDescriptionsImpl =
         | Item.ActivePatternResult _ // "let (|Foo|Bar|) = .. Fo$o ..." - no keyword
             ->  None
 
-    let FormatDescriptionOfItem isDecl (infoReader:InfoReader)  m denv d : FSharpToolTipElement = 
+    let FormatStructuredDescriptionOfItem isDecl (infoReader:InfoReader)  m denv d : FSharpStructuredToolTipElement = 
         ErrorScope.Protect m 
             (fun () -> FormatItemDescriptionToToolTipElement isDecl infoReader m denv d)
-            (fun err -> FSharpToolTipElement.CompositionError(err))
+            (fun err -> FSharpStructuredToolTipElement.CompositionError(err))
+
+    let FormatDescriptionOfItem isDecl infoReader m denv d =
+        FormatStructuredDescriptionOfItem isDecl infoReader m denv d
+        |> Tooltips.ToFSharpToolTipElement
         
+    let FormatStructuredReturnTypeOfItem (infoReader:InfoReader) m denv d = 
+        ErrorScope.Protect m (fun () -> FormatItemReturnTypeAsLayout infoReader m denv d) (fun err -> wordL (tagText err))
+
     let FormatReturnTypeOfItem (infoReader:InfoReader) m denv d = 
-        ErrorScope.Protect m (fun () -> bufs (fun buf -> FormatItemReturnTypeToBuffer infoReader m denv buf d)) (fun err -> err)
+        FormatStructuredReturnTypeOfItem infoReader m denv d
+        |> showL
 
     // Compute the index of the VS glyph shown with an item in the Intellisense menu
-    let GlyphOfItem(denv,d) = 
-
+    let GlyphOfItem(denv, item) : FSharpGlyph = 
          /// Find the glyph for the given representation.    
          let reprToGlyph repr = 
             match repr with
             | TFSharpObjectRepr om -> 
                 match om.fsobjmodel_kind with 
-                | TTyconClass -> iIconGroupClass
-                | TTyconInterface -> iIconGroupInterface
-                | TTyconStruct -> iIconGroupStruct
-                | TTyconDelegate _ -> iIconGroupDelegate
-                | TTyconEnum _ -> iIconGroupEnum
-            | TRecdRepr _ -> iIconGroupType
-            | TUnionRepr _ -> iIconGroupUnion
-            | TILObjectRepr(_,_,td) -> 
+                | TTyconClass -> FSharpGlyph.Class
+                | TTyconInterface -> FSharpGlyph.Interface
+                | TTyconStruct -> FSharpGlyph.Struct
+                | TTyconDelegate _ -> FSharpGlyph.Delegate
+                | TTyconEnum _ -> FSharpGlyph.Enum
+            | TRecdRepr _ -> FSharpGlyph.Type
+            | TUnionRepr _ -> FSharpGlyph.Union
+            | TILObjectRepr (TILObjectReprData (_,_,td)) -> 
                 match td.tdKind with 
-                | ILTypeDefKind.Class -> iIconGroupClass
-                | ILTypeDefKind.ValueType -> iIconGroupStruct
-                | ILTypeDefKind.Interface -> iIconGroupInterface
-                | ILTypeDefKind.Enum -> iIconGroupEnum
-                | ILTypeDefKind.Delegate -> iIconGroupDelegate
-            | TAsmRepr _ -> iIconGroupTypedef
-            | TMeasureableRepr _-> iIconGroupTypedef 
+                | ILTypeDefKind.Class -> FSharpGlyph.Class
+                | ILTypeDefKind.ValueType -> FSharpGlyph.Struct
+                | ILTypeDefKind.Interface -> FSharpGlyph.Interface
+                | ILTypeDefKind.Enum -> FSharpGlyph.Enum
+                | ILTypeDefKind.Delegate -> FSharpGlyph.Delegate
+            | TAsmRepr _ -> FSharpGlyph.Typedef
+            | TMeasureableRepr _-> FSharpGlyph.Typedef 
 #if EXTENSIONTYPING
-            | TProvidedTypeExtensionPoint _-> iIconGroupTypedef 
-            | TProvidedNamespaceExtensionPoint  _-> iIconGroupTypedef  
+            | TProvidedTypeExtensionPoint _-> FSharpGlyph.Typedef 
+            | TProvidedNamespaceExtensionPoint  _-> FSharpGlyph.Typedef  
 #endif
-            | TNoRepr -> iIconGroupClass  
+            | TNoRepr -> FSharpGlyph.Class  
          
          /// Find the glyph for the given type representation.
          let typeToGlyph typ = 
             if isAppTy denv.g typ then 
                 let tcref = tcrefOfAppTy denv.g typ
                 tcref.TypeReprInfo |> reprToGlyph 
-            elif isAnyTupleTy denv.g typ then iIconGroupStruct
-            elif isFunction denv.g typ then iIconGroupDelegate
-            elif isTyparTy denv.g typ then iIconGroupStruct
-            else iIconGroupTypedef
-
+            elif isStructTupleTy denv.g typ then FSharpGlyph.Struct
+            elif isRefTupleTy denv.g typ then FSharpGlyph.Class
+            elif isFunction denv.g typ then FSharpGlyph.Delegate
+            elif isTyparTy denv.g typ then FSharpGlyph.Struct
+            else FSharpGlyph.Typedef
             
-         /// Find the glyph for the given value representation.
-         let ValueToGlyph typ = 
-            if isFunction denv.g typ then iIconGroupMethod
-            else iIconGroupConstant
-              
-         /// Find the major glyph of the given named item.       
-         let namedItemToMajorGlyph item = 
-            // This may explore assemblies that are not in the reference set,
-            // e.g. for type abbreviations to types not in the reference set. 
-            // In this case just use iIconGroupClass.
-           protectAssemblyExploration  iIconGroupClass (fun () ->
-              match item with 
-              | Item.Value(vref) | Item.CustomBuilder (_,vref) -> ValueToGlyph(vref.Type)
-              | Item.Types(_,typ::_) -> typeToGlyph (stripTyEqns denv.g typ)    
-              | Item.UnionCase _
-              | Item.ActivePatternCase _ -> iIconGroupEnumMember   
-              | Item.ExnCase _ -> iIconGroupException   
-              | Item.RecdField _ -> iIconGroupFieldBlue   
-              | Item.ILField _ -> iIconGroupFieldBlue    
-              | Item.Event _ -> iIconGroupEvent   
-              | Item.Property _ -> iIconGroupProperty   
-              | Item.CtorGroup _ 
-              | Item.DelegateCtor _ 
-              | Item.FakeInterfaceCtor _
-              | Item.CustomOperation _
-              | Item.MethodGroup _  -> iIconGroupMethod   
-              | Item.TypeVar _ 
-              | Item.Types _ -> iIconGroupClass   
-              | Item.ModuleOrNamespaces(modref::_) -> 
-                    if modref.IsNamespace then iIconGroupNameSpace else iIconGroupModule
-              | Item.ArgName _ -> iIconGroupVariable
-              | Item.SetterArg _ -> iIconGroupVariable
-              | _ -> iIconGroupError)
+         // This may explore assemblies that are not in the reference set,
+         // e.g. for type abbreviations to types not in the reference set. 
+         // In this case just use GlyphMajor.Class.
+         protectAssemblyExploration FSharpGlyph.Class (fun () ->
+            match item with 
+            | Item.Value(vref) | Item.CustomBuilder (_,vref) -> 
+                  if isFunction denv.g vref.Type then FSharpGlyph.Method
+                  elif vref.LiteralValue.IsSome then FSharpGlyph.Constant
+                  else FSharpGlyph.Variable
+            | Item.Types(_,typ::_) -> typeToGlyph (stripTyEqns denv.g typ)    
+            | Item.UnionCase _
+            | Item.ActivePatternCase _ -> FSharpGlyph.EnumMember   
+            | Item.ExnCase _ -> FSharpGlyph.Exception   
+            | Item.RecdField _ -> FSharpGlyph.Field
+            | Item.ILField _ -> FSharpGlyph.Field
+            | Item.Event _ -> FSharpGlyph.Event   
+            | Item.Property _ -> FSharpGlyph.Property   
+            | Item.CtorGroup _ 
+            | Item.DelegateCtor _ 
+            | Item.FakeInterfaceCtor _
+            | Item.CustomOperation _ -> FSharpGlyph.Method
+            | Item.MethodGroup (_, minfos, _) when minfos |> List.forall (fun minfo -> minfo.IsExtensionMember) -> FSharpGlyph.ExtensionMethod
+            | Item.MethodGroup _ -> FSharpGlyph.Method
+            | Item.TypeVar _ 
+            | Item.Types _ 
+            | Item.UnqualifiedType _ -> FSharpGlyph.Class   
+            | Item.ModuleOrNamespaces(modref::_) -> 
+                  if modref.IsNamespace then FSharpGlyph.NameSpace else FSharpGlyph.Module
+            | Item.ArgName _ -> FSharpGlyph.Variable
+            | Item.SetterArg _ -> FSharpGlyph.Variable
+            | _ -> FSharpGlyph.Error)
 
-         /// Find the minor glyph of the given named item.       
-         let namedItemToMinorGlyph item = 
-            // This may explore assemblies that are not in the reference set,
-            // e.g. for type abbreviations to types not in the reference set. 
-            // In this case just use iIconItemNormal.
-           protectAssemblyExploration  iIconItemNormal (fun () ->
-             match item with 
-              | Item.Value(vref) when isFunction denv.g vref.Type -> iIconItemSpecial
-              | _ -> iIconItemNormal)
+type FSharpAccessibility(a:Accessibility, ?isProtected) = 
+    let isProtected = defaultArg isProtected  false
 
-         (6 * namedItemToMajorGlyph d) + namedItemToMinorGlyph d
+    let isInternalCompPath x = 
+        match x with 
+        | CompPath(ILScopeRef.Local,[]) -> true 
+        | _ -> false
 
-     
+    let (|Public|Internal|Private|) (TAccess p) = 
+        match p with 
+        | [] -> Public 
+        | _ when List.forall isInternalCompPath p  -> Internal 
+        | _ -> Private
+
+    member __.IsPublic = not isProtected && match a with Public -> true | _ -> false
+
+    member __.IsPrivate = not isProtected && match a with Private -> true | _ -> false
+
+    member __.IsInternal = not isProtected && match a with Internal -> true | _ -> false
+
+    member __.IsProtected = isProtected
+
+    member __.Contents = a
+
+    override x.ToString() = 
+        let (TAccess paths) = a
+        let mangledTextOfCompPath (CompPath(scoref,path)) = getNameOfScopeRef scoref + "/" + textOfPath (List.map fst path)  
+        String.concat ";" (List.map mangledTextOfCompPath paths)
+
 /// An intellisense declaration
 [<Sealed>]
-type FSharpDeclarationListItem(name, glyph:int, info) =
-    let mutable descriptionTextHolder:FSharpToolTipText option = None
+type FSharpDeclarationListItem(name: string, nameInCode: string, fullName: string, glyph: FSharpGlyph, info, accessibility: FSharpAccessibility option,
+                               kind: CompletionItemKind, isOwnMember: bool, priority: int, isResolved: bool, namespaceToOpen: string option) =
+
+    let mutable descriptionTextHolder: FSharpToolTipText<_> option = None
     let mutable task = null
 
     member decl.Name = name
+    member decl.NameInCode = nameInCode
 
-    member decl.DescriptionTextAsync = 
+    member decl.StructuredDescriptionTextAsync = 
             match info with
-            | Choice1Of2 (items, infoReader, m, denv, reactor:IReactorOperations, checkAlive) -> 
+            | Choice1Of2 (items: CompletionItem list, infoReader, m, denv, reactor:IReactorOperations, checkAlive) -> 
                     // reactor causes the lambda to execute on the background compiler thread, through the Reactor
-                    reactor.EnqueueAndAwaitOpAsync ("DescriptionTextAsync", fun _ct -> 
+                    reactor.EnqueueAndAwaitOpAsync ("StructuredDescriptionTextAsync", fun ctok -> 
+                         RequireCompilationThread ctok
                           // This is where we do some work which may touch TAST data structures owned by the IncrementalBuilder - infoReader, item etc. 
                           // It is written to be robust to a disposal of an IncrementalBuilder, in which case it will just return the empty string. 
                           // It is best to think of this as a "weak reference" to the IncrementalBuilder, i.e. this code is written to be robust to its
                           // disposal. Yes, you are right to scratch your head here, but this is ok.
-                              if checkAlive() then FSharpToolTipText(items |> Seq.toList |> List.map (FormatDescriptionOfItem true infoReader m denv))
-                              else FSharpToolTipText [ FSharpToolTipElement.Single(FSComp.SR.descriptionUnavailable(), FSharpXmlDoc.None) ])
+                         cancellable.Return(
+                              if checkAlive() then FSharpToolTipText(items |> List.map (fun x -> ItemDescriptionsImpl.FormatStructuredDescriptionOfItem true infoReader m denv x.Item))
+                              else FSharpToolTipText [ FSharpStructuredToolTipElement.Single(wordL (tagText (FSComp.SR.descriptionUnavailable())), FSharpXmlDoc.None) ]))
             | Choice2Of2 result -> 
                 async.Return result
 
-    member decl.DescriptionText = 
+    member decl.DescriptionTextAsync = 
+        decl.StructuredDescriptionTextAsync
+        |> Tooltips.Map Tooltips.ToFSharpToolTipText
+
+    member decl.StructuredDescriptionText = 
         match descriptionTextHolder with
         | Some descriptionText -> descriptionText
         | None ->
@@ -1246,7 +1421,7 @@ type FSharpDeclarationListItem(name, glyph:int, info) =
                 if isNull task then
                     // kick off the actual (non-cooperative) work
                     task <- System.Threading.Tasks.Task.Factory.StartNew(fun() -> 
-                        let text = decl.DescriptionTextAsync |> Async.RunSynchronously
+                        let text = decl.StructuredDescriptionTextAsync |> Async.RunSynchronously
                         descriptionTextHolder <- Some text) 
 
                 // The dataTipSpinWaitTime limits how long we block the UI thread while a tooltip pops up next to a selected item in an IntelliSense completion list.
@@ -1254,76 +1429,164 @@ type FSharpDeclarationListItem(name, glyph:int, info) =
                 task.Wait EnvMisc2.dataTipSpinWaitTime  |> ignore
                 match descriptionTextHolder with 
                 | Some text -> text
-                | None -> FSharpToolTipText [ FSharpToolTipElement.Single(FSComp.SR.loadingDescription(), FSharpXmlDoc.None) ]
+                | None -> FSharpToolTipText [ FSharpStructuredToolTipElement.Single(wordL (tagText (FSComp.SR.loadingDescription())), FSharpXmlDoc.None) ]
 
             | Choice2Of2 result -> 
                 result
 
-    member decl.Glyph = glyph      
-      
+    member decl.DescriptionText = decl.StructuredDescriptionText |> Tooltips.ToFSharpToolTipText
+    member decl.Glyph = glyph 
+    member decl.Accessibility = accessibility
+    member decl.Kind = kind
+    member decl.IsOwnMember = isOwnMember
+    member decl.MinorPriority = priority
+    member decl.FullName = fullName
+    member decl.IsResolved = isResolved
+    member decl.NamespaceToOpen = namespaceToOpen
+
 /// A table of declarations for Intellisense completion 
 [<Sealed>]
-type FSharpDeclarationListInfo(declarations: FSharpDeclarationListItem[]) = 
-
+type FSharpDeclarationListInfo(declarations: FSharpDeclarationListItem[], isForType: bool, isError: bool) = 
     member self.Items = declarations
-    
+    member self.IsForType = isForType
+    member self.IsError = isError
+
     // Make a 'Declarations' object for a set of selected items
-    static member Create(infoReader:InfoReader, m, denv, items, reactor, checkAlive) = 
+    static member Create(infoReader:InfoReader, m, denv, getAccessibility, items: CompletionItem list, reactor, currentNamespaceOrModule: string[] option, isAttributeApplicationContext: bool, checkAlive) = 
         let g = infoReader.g
-         
-        let items = items |> RemoveExplicitlySuppressed g
+        let isForType = items |> List.exists (fun x -> x.Type.IsSome)
+        let items = items |> ItemDescriptionsImpl.RemoveExplicitlySuppressedCompletionItems g
         
-        // Sort by name. For things with the same name, 
+        let tyconRefOptEq tref1 tref2 =
+            match tref1 with
+            | Some tref1 -> tyconRefEq g tref1 tref2
+            | None -> false
+
+        // Adjust items priority. Sort by name. For things with the same name, 
         //     - show types with fewer generic parameters first
         //     - show types before over other related items - they usually have very useful XmlDocs 
-        let items = 
-            items |> List.sortBy (fun d -> 
-                let n = 
-                    match d with  
-                    | Item.Types (_,(TType_app(tcref,_) :: _)) -> 1 + tcref.TyparsNoRange.Length
-                    // Put delegate ctors after types, sorted by #typars. RemoveDuplicateItems will remove FakeInterfaceCtor and DelegateCtor if an earlier type is also reported with this name
-                    | Item.FakeInterfaceCtor (TType_app(tcref,_)) 
-                    | Item.DelegateCtor (TType_app(tcref,_)) -> 1000 + tcref.TyparsNoRange.Length
-                    // Put type ctors after types, sorted by #typars. RemoveDuplicateItems will remove DefaultStructCtors if a type is also reported with this name
-                    | Item.CtorGroup (_, (cinfo :: _)) -> 1000 + 10 * (tcrefOfAppTy g cinfo.EnclosingType).TyparsNoRange.Length 
-                    | _ -> 0
-                (d.DisplayName,n))
-
-        // Remove all duplicates. We've put the types first, so this removes the DelegateCtor and DefaultStructCtor's.
-        let items = items |> RemoveDuplicateItems g
+        let _, _, items = 
+            items 
+            |> List.map (fun x ->
+                match x.Item with
+                | Item.Types (_,(TType_app(tcref,_) :: _)) -> { x with MinorPriority = 1 + tcref.TyparsNoRange.Length }
+                // Put delegate ctors after types, sorted by #typars. RemoveDuplicateItems will remove FakeInterfaceCtor and DelegateCtor if an earlier type is also reported with this name
+                | Item.FakeInterfaceCtor (TType_app(tcref,_)) 
+                | Item.DelegateCtor (TType_app(tcref,_)) -> { x with MinorPriority = 1000 + tcref.TyparsNoRange.Length }
+                // Put type ctors after types, sorted by #typars. RemoveDuplicateItems will remove DefaultStructCtors if a type is also reported with this name
+                | Item.CtorGroup (_, (cinfo :: _)) -> { x with MinorPriority = 1000 + 10 * (tcrefOfAppTy g cinfo.EnclosingType).TyparsNoRange.Length }
+                | Item.MethodGroup(_, minfo :: _, _) -> { x with IsOwnMember = tyconRefOptEq x.Type minfo.DeclaringEntityRef }
+                | Item.Property(_, pinfo :: _) -> { x with IsOwnMember = tyconRefOptEq x.Type (tcrefOfAppTy g pinfo.EnclosingType) }
+                | Item.ILField finfo -> { x with IsOwnMember = tyconRefOptEq x.Type (tcrefOfAppTy g finfo.EnclosingType) }
+                | _ -> x)
+            |> List.sortBy (fun x -> x.MinorPriority)
+            |> List.fold (fun (prevRealPrior, prevNormalizedPrior, acc) x ->
+                if x.MinorPriority = prevRealPrior then
+                    prevRealPrior, prevNormalizedPrior, x :: acc
+                else
+                    let normalizedPrior = prevNormalizedPrior + 1
+                    x.MinorPriority, normalizedPrior, { x with MinorPriority = normalizedPrior } :: acc
+                ) (0, 0, [])
 
         if verbose then dprintf "service.ml: mkDecls: %d found groups after filtering\n" (List.length items); 
 
-        // Group by display name
-        let items = items |> List.groupBy (fun d -> d.DisplayName) 
+        // Group by full name for unresolved items and by display name for resolved ones.
+        let items = 
+            items
+            |> List.rev
+            // Prefer items from file check results to ones from referenced assemblies via GetAssemblyContent ("all entities")
+            |> List.sortBy (fun x -> x.Unresolved.IsSome) 
+            // Remove all duplicates. We've put the types first, so this removes the DelegateCtor and DefaultStructCtor's.
+            |> RemoveDuplicateCompletionItems g
+            |> List.groupBy (fun x ->
+                match x.Unresolved with
+                | Some u -> 
+                    match u.Namespace with
+                    | [||] -> u.DisplayName
+                    | ns -> (ns |> String.concat ".") + "." + u.DisplayName
+                | None -> x.Item.DisplayName)
+            |> List.map (fun (_, items) -> 
+                let item = items.Head
+                match item.Unresolved with
+                | Some u -> u.DisplayName
+                | None -> item.Item.DisplayName
+                , items)
 
         // Filter out operators (and list)
         let items = 
             // Check whether this item looks like an operator.
-            let isOpItem(nm,item) = 
-                match item with 
+            let isOperatorItem(name, item) = 
+                match item |> List.map (fun x -> x.Item) with
                 | [Item.Value _]
-                | [Item.MethodGroup(_,[_],_)] -> 
-                    (IsOpName nm) && nm.[0]='(' && nm.[nm.Length-1]=')'
-                | [Item.UnionCase _] -> IsOpName nm
+                | [Item.MethodGroup _ ] -> IsOperatorName name
+                | [Item.UnionCase _] -> IsOperatorName name
                 | _ -> false              
-
-            let isFSharpList nm = (nm = "[]") // list shows up as a Type and a UnionCase, only such entity with a symbolic name, but want to filter out of intellisense
-
-            items |> List.filter (fun (nm,items) -> not (isOpItem(nm,items)) && not(isFSharpList nm)) 
-
-
+            let isFSharpList name = (name = "[]") // list shows up as a Type and a UnionCase, only such entity with a symbolic name, but want to filter out of intellisense
+            items |> List.filter (fun (displayName, items) -> not (isOperatorItem(displayName, items)) && not (isFSharpList displayName)) 
+                    
         let decls = 
-            // Filter out duplicate names
-            items |> List.map (fun (nm,itemsWithSameName) -> 
-                match itemsWithSameName with
+            items 
+            |> List.map (fun (displayName, itemsWithSameFullName) -> 
+                match itemsWithSameFullName with
                 | [] -> failwith "Unexpected empty bag"
-                | items -> 
-                    new FSharpDeclarationListItem(nm, GlyphOfItem(denv,items.Head), Choice1Of2 (items, infoReader, m, denv, reactor, checkAlive)))
+                | _ ->
+                    let items =
+                        match itemsWithSameFullName |> List.partition (fun x -> x.Unresolved.IsNone) with
+                        | [], unresolved -> unresolved
+                        // if there are resolvable items, throw out unresolved to prevent duplicates like `Set` and `FSharp.Collections.Set`.
+                        | resolved, _ -> resolved 
+                    
+                    let item = items.Head
+                    let glyph = ItemDescriptionsImpl.GlyphOfItem(denv, item.Item)
 
-        new FSharpDeclarationListInfo(Array.ofList decls)
+                    let name, nameInCode =
+                        if displayName.StartsWith "( " && displayName.EndsWith " )" then
+                            let cleanName = displayName.[2..displayName.Length - 3]
+                            cleanName, 
+                            if IsOperatorName displayName then cleanName else "``" + cleanName + "``"
+                        else 
+                            displayName,
+                            match item.Unresolved with
+                            | Some _ -> displayName
+                            | None -> Lexhelp.Keywords.QuoteIdentifierIfNeeded displayName
 
+                    let isAttribute = ItemDescriptionsImpl.IsAttribute infoReader item.Item
+                    
+                    let cutAttributeSuffix (name: string) =
+                        if isAttributeApplicationContext && isAttribute && name <> "Attribute" && name.EndsWith "Attribute" then
+                            name.[0..name.Length - "Attribute".Length - 1]
+                        else name
+
+                    let name = cutAttributeSuffix name
+                    let nameInCode = cutAttributeSuffix nameInCode
+                    let fullName = ItemDescriptionsImpl.FullNameOfItem g item.Item
+                    
+                    let namespaceToOpen = 
+                        item.Unresolved 
+                        |> Option.map (fun x -> x.Namespace)
+                        |> Option.bind (fun ns ->
+                            if ns |> Array.startsWith [|"Microsoft"; "FSharp"|] then None
+                            else Some ns)
+                        |> Option.map (fun ns ->
+                            match currentNamespaceOrModule with
+                            | Some currentNs ->
+                               if ns |> Array.startsWith currentNs then
+                                 ns.[currentNs.Length..]
+                               else ns
+                            | None -> ns)
+                        |> Option.bind (function
+                            | [||] -> None
+                            | ns -> Some (ns |> String.concat "."))
+
+                    FSharpDeclarationListItem(
+                        name, nameInCode, fullName, glyph, Choice1Of2 (items, infoReader, m, denv, reactor, checkAlive), getAccessibility item.Item, 
+                        item.Kind, item.IsOwnMember, item.MinorPriority, item.Unresolved.IsNone, namespaceToOpen))
+
+        new FSharpDeclarationListInfo(Array.ofList decls, isForType, false)
     
-    static member Error msg = new FSharpDeclarationListInfo([| new FSharpDeclarationListItem("<Note>", 0, Choice2Of2 (FSharpToolTipText [FSharpToolTipElement.CompositionError msg])) |] )
-    static member Empty = new FSharpDeclarationListInfo([| |])
-
+    static member Error msg = 
+        new FSharpDeclarationListInfo(
+                [| FSharpDeclarationListItem("<Note>", "<Note>", "<Note>", FSharpGlyph.Error, Choice2Of2 (FSharpToolTipText [FSharpStructuredToolTipElement.CompositionError msg]), 
+                                             None, CompletionItemKind.Other, false, 0, false, None) |], false, true)
+    
+    static member Empty = FSharpDeclarationListInfo([| |], false, false)

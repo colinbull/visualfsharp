@@ -5,13 +5,15 @@
 //
 // Technique 2:
 //
-//   Compile this file as an EXE that has InternalsVisibleTo access into the
+//   Enable some tests in the #if EXE section at the end of the file, 
+//   then compile this file as an EXE that has InternalsVisibleTo access into the
 //   appropriate DLLs.  This can be the quickest way to get turnaround on updating the tests
 //   and capturing large amounts of structured output.
-//    cd Debug\net40\bin
-//    .\fsc.exe --define:EXE -o VisualFSharp.Unittests.exe -g --optimize- -r .\FSharp.LanguageService.Compiler.dll -r nunit.framework.dll ..\..\..\tests\service\FsUnit.fs ..\..\..\tests\service\Common.fs /delaysign /keyfile:..\..\..\src\fsharp\msft.pubkey ..\..\..\tests\service\EditorTests.fs 
-//    .\VisualFSharp.Unittests.exe 
-//
+(*
+    cd Debug\net40\bin
+    .\fsc.exe --define:EXE -r:.\Microsoft.Build.Utilities.Core.dll -o VisualFSharp.Unittests.exe -g --optimize- -r .\FSharp.LanguageService.Compiler.dll -r nunit.framework.dll ..\..\..\tests\service\FsUnit.fs ..\..\..\tests\service\Common.fs /delaysign /keyfile:..\..\..\src\fsharp\msft.pubkey ..\..\..\tests\service\EditorTests.fs 
+    .\VisualFSharp.Unittests.exe 
+*)
 // Technique 3: 
 // 
 //    Use F# Interactive.  This only works for FSHarp.Compiler.Service.dll which has a public API
@@ -66,14 +68,15 @@ let ``Intro test`` () =
     // Get tool tip at the specified location
     let tip = typeCheckResults.GetToolTipTextAlternate(4, 7, inputLines.[1], ["foo"], identToken) |> Async.RunSynchronously
     // Get declarations (autocomplete) for a location
-    let decls =  typeCheckResults.GetDeclarationListInfo(Some parseResult, 7, 23, inputLines.[6], [], "msg", fun _ -> false)|> Async.RunSynchronously
-    [ for item in decls.Items -> item.Name ] |> shouldEqual
+    let decls =  typeCheckResults.GetDeclarationListInfo(Some parseResult, 7, 23, inputLines.[6], [], "msg", (fun _ -> []), fun _ -> false)|> Async.RunSynchronously
+    CollectionAssert.AreEquivalent(
           ["Chars"; "Clone"; "CompareTo"; "Contains"; "CopyTo"; "EndsWith"; "Equals";
            "GetEnumerator"; "GetHashCode"; "GetType"; "GetTypeCode"; "IndexOf";
            "IndexOfAny"; "Insert"; "IsNormalized"; "LastIndexOf"; "LastIndexOfAny";
            "Length"; "Normalize"; "PadLeft"; "PadRight"; "Remove"; "Replace"; "Split";
            "StartsWith"; "Substring"; "ToCharArray"; "ToLower"; "ToLowerInvariant";
-           "ToString"; "ToUpper"; "ToUpperInvariant"; "Trim"; "TrimEnd"; "TrimStart"]
+           "ToString"; "ToUpper"; "ToUpperInvariant"; "Trim"; "TrimEnd"; "TrimStart"],
+          [ for item in decls.Items -> item.Name ])
     // Get overloads of the String.Concat method
     let methods = typeCheckResults.GetMethodsAlternate(5, 27, inputLines.[4], Some ["String"; "Concat"]) |> Async.RunSynchronously
 
@@ -93,6 +96,26 @@ let ``Intro test`` () =
                ("Concat", ["str0: string"; "str1: string"; "str2: string"]);
                ("Concat", ["arg0: obj"; "arg1: obj"; "arg2: obj"; "arg3: obj"]);
                ("Concat", ["str0: string"; "str1: string"; "str2: string"; "str3: string"])]
+
+
+[<Test>]
+let ``Basic cancellation test`` () = 
+   try 
+    printfn "locally injecting a cancellation condition in incremental building"
+    use _holder = IncrementalBuild.LocallyInjectCancellationFault()
+    
+    // Split the input & define file name
+    let inputLines = input.Split('\n')
+    let file = "/home/user/Test.fsx"
+    async { 
+        checker.ClearLanguageServiceRootCachesAndCollectAndFinalizeAllTransients()
+        let! checkOptions, _diagnostics = checker.GetProjectOptionsFromScript(file, input) 
+        let! parseResult, typedRes = checker.ParseAndCheckFileInProject(file, 0, input, checkOptions) 
+        return parseResult, typedRes
+    } |> Async.RunSynchronously
+      |> ignore
+    Assert.Fail("expected a cancellation")
+   with :? OperationCanceledException -> ()
 
 [<Test>]
 let ``GetMethodsAsSymbols should return all overloads of a method as FSharpSymbolUse`` () =
@@ -244,7 +267,7 @@ let ``Expression typing test`` () =
     // gives the results for the string type. 
     // 
     for col in 42..43 do 
-        let decls =  typeCheckResults.GetDeclarationListInfo(Some parseResult, 2, col, inputLines.[1], [], "", fun _ -> false)|> Async.RunSynchronously
+        let decls =  typeCheckResults.GetDeclarationListInfo(Some parseResult, 2, col, inputLines.[1], [], "", (fun _ -> []), fun _ -> false)|> Async.RunSynchronously
         set [ for item in decls.Items -> item.Name ] |> shouldEqual
            (set
               ["Chars"; "Clone"; "CompareTo"; "Contains"; "CopyTo"; "EndsWith"; "Equals";
@@ -271,7 +294,7 @@ type Test() =
     let file = "/home/user/Test.fsx"
     let parseResult, typeCheckResults =  parseAndCheckScript(file, input) 
 
-    let decls = typeCheckResults.GetDeclarationListInfo(Some parseResult, 4, 21, inputLines.[3], [], "", fun _ -> false)|> Async.RunSynchronously
+    let decls = typeCheckResults.GetDeclarationListInfo(Some parseResult, 4, 21, inputLines.[3], [], "", (fun _ -> []), fun _ -> false)|> Async.RunSynchronously
     let item = decls.Items |> Array.tryFind (fun d -> d.Name = "abc")
     match item with
     | Some item -> 
@@ -292,7 +315,7 @@ type Test() =
     let file = "/home/user/Test.fsx"
     let parseResult, typeCheckResults =  parseAndCheckScript(file, input) 
 
-    let decls = typeCheckResults.GetDeclarationListInfo(Some parseResult, 4, 22, inputLines.[3], [], "", fun _ -> false)|> Async.RunSynchronously
+    let decls = typeCheckResults.GetDeclarationListInfo(Some parseResult, 4, 22, inputLines.[3], [], "", (fun _ -> []), fun _ -> false)|> Async.RunSynchronously
     let item = decls.Items |> Array.tryFind (fun d -> d.Name = "abc")
     match item with
     | Some item -> 
@@ -313,7 +336,7 @@ type Test() =
     let file = "/home/user/Test.fsx"
     let parseResult, typeCheckResults =  parseAndCheckScript(file, input) 
 
-    let decls = typeCheckResults.GetDeclarationListInfo(Some parseResult, 4, 15, inputLines.[3], [], "", fun _ -> false)|> Async.RunSynchronously
+    let decls = typeCheckResults.GetDeclarationListInfo(Some parseResult, 4, 15, inputLines.[3], [], "", (fun _ -> []), fun _ -> false)|> Async.RunSynchronously
     decls.Items |> Seq.exists (fun d -> d.Name = "abc") |> shouldEqual true
 
 [<Test; Ignore("Currently failing, see #139")>]
@@ -408,22 +431,22 @@ let _ = sprintf @"%O\n%-5s" "1" "2" """
     typeCheckResults.Errors |> shouldEqual [||]
     typeCheckResults.GetFormatSpecifierLocations() 
     |> Array.map (fun range -> range.StartLine, range.StartColumn, range.EndLine, range.EndColumn)
-    |> shouldEqual [|(2, 45, 2, 46); 
-                     (3, 23, 3, 24); 
-                     (4, 38, 4, 39); 
-                     (5, 29, 5, 30); 
-                     (6, 17, 6, 19);
-                     (7, 17, 7, 21); 
-                     (8, 17, 8, 22);
-                     (9, 18, 9, 21); 
-                     (10, 18, 10, 20);
-                     (12, 12, 12, 14); 
-                     (15, 12, 15, 14);
-                     (16, 28, 16, 29); 
-                     (18, 30, 18, 31);
-                     (19, 30, 19, 31);
-                     (20, 19, 20, 24); 
-                     (21, 18, 21, 19); (21, 22, 21, 25)|]
+    |> shouldEqual [|(2, 45, 2, 47); 
+                     (3, 23, 3, 25); 
+                     (4, 38, 4, 40); 
+                     (5, 29, 5, 31); 
+                     (6, 17, 6, 20);
+                     (7, 17, 7, 22); 
+                     (8, 17, 8, 23);
+                     (9, 18, 9, 22); 
+                     (10, 18, 10, 21);
+                     (12, 12, 12, 15); 
+                     (15, 12, 15, 15);
+                     (16, 28, 16, 30); 
+                     (18, 30, 18, 32);
+                     (19, 30, 19, 32);
+                     (20, 19, 20, 25); 
+                     (21, 18, 21, 20); (21, 22, 21, 26)|]
 
 [<Test>]
 let ``Printf specifiers for triple-quote strings`` () = 
@@ -443,10 +466,10 @@ let _ = List.iter(printfn \"\"\"%-A
     typeCheckResults.Errors |> shouldEqual [||]
     typeCheckResults.GetFormatSpecifierLocations() 
     |> Array.map (fun range -> range.StartLine, range.StartColumn, range.EndLine, range.EndColumn)
-    |> shouldEqual [|(2, 19, 2, 21);
-                     (4, 12, 4, 14);
-                     (6, 29, 6, 31);
-                     (7, 29, 7, 30); (7, 33, 7, 34)|]
+    |> shouldEqual [|(2, 19, 2, 22);
+                     (4, 12, 4, 15);
+                     (6, 29, 6, 32);
+                     (7, 29, 7, 31); (7, 33, 7, 35)|]
  
 [<Test>]
 let ``Printf specifiers for user-defined functions`` () = 
@@ -463,9 +486,9 @@ let _ = debug "[LanguageService] Type checking fails for '%s' with content=%A an
     typeCheckResults.Errors |> shouldEqual [||]
     typeCheckResults.GetFormatSpecifierLocations() 
     |> Array.map (fun range -> range.StartLine, range.StartColumn, range.EndLine, range.EndColumn)
-    |> shouldEqual [|(3, 24, 3, 25); 
-                     (3, 29, 3, 30);
-                     (4, 58, 4, 59); (4, 75, 4, 76); (4, 82, 4, 83); (4, 108, 4, 109)|]
+    |> shouldEqual [|(3, 24, 3, 26); 
+                     (3, 29, 3, 31);
+                     (4, 58, 4, 60); (4, 75, 4, 77); (4, 82, 4, 84); (4, 108, 4, 110)|]
 
 [<Test>]
 let ``should not report format specifiers for illformed format strings`` () = 
@@ -566,7 +589,7 @@ let _ = RegexTypedStatic.IsMatch<"ABC" >(  (*$*) ) // TEST: no assert on Ctrl-sp
     File.WriteAllText(fileName1, fileSource1)
     let fileLines1 = File.ReadAllLines(fileName1)
     let fileNames = [fileName1]
-    let args = Array.append (mkProjectCommandLineArgs (dllName, fileNames)) [| "-r:" + PathRelativeToTestAssembly(@"UnitTestsResources\MockTypeProviders\DummyProviderForLanguageServiceTesting.dll") |]
+    let args = Array.append (mkProjectCommandLineArgs (dllName, fileNames)) [| "-r:" + PathRelativeToTestAssembly(@"UnitTests\MockTypeProviders\DummyProviderForLanguageServiceTesting.dll") |]
     let internal options =  checker.GetProjectOptionsFromCommandLineArgs (projFileName, args)
     let cleanFileName a = if a = fileName1 then "file1" else "??"
 
@@ -715,8 +738,10 @@ let ``Test TPProject param info`` () =
 #if EXE
 
 ``Intro test`` () 
-``Test TPProject all symbols`` () 
-``Test TPProject errors`` () 
-``Test TPProject quick info`` () 
-``Test TPProject param info`` () 
+//``Test TPProject all symbols`` () 
+//``Test TPProject errors`` () 
+//``Test TPProject quick info`` () 
+//``Test TPProject param info`` () 
+``Basic cancellation test`` ()
+``Intro test`` () 
 #endif

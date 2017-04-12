@@ -14,24 +14,20 @@
     <AssemblyName>HostedCompilerServer</AssemblyName>
     <TargetFrameworkVersion>v4.5</TargetFrameworkVersion>
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
-    <TargetFSharpCoreVersion>4.4.1.0</TargetFSharpCoreVersion>
+    <OutputPath>..\..\bin</OutputPath>
+	<CustomOutputPath>true</CustomOutputPath>
     <Name>HostedCompilerServer</Name>
-    <OutputPath>..\..\bin\</OutputPath>
-    <CustomOutputPath>true</CustomOutputPath>
-    <DocumentationFile>$(OutputPath)$(AssemblyName).xml</DocumentationFile>
     <WarningLevel>3</WarningLevel>
     <PlatformTarget>AnyCPU</PlatformTarget>
     <Prefer32Bit>true</Prefer32Bit>
-  </PropertyGroup>
+  
+</PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
-    <DebugSymbols>true</DebugSymbols>
-    <DebugType>full</DebugType>
     <Optimize>false</Optimize>
     <Tailcalls>false</Tailcalls>
     <DefineConstants>DEBUG;TRACE</DefineConstants>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
-    <DebugType>pdbonly</DebugType>
     <Optimize>true</Optimize>
     <Tailcalls>true</Tailcalls>
     <DefineConstants>TRACE</DefineConstants>
@@ -41,11 +37,6 @@
     <None Include="App.config" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\FSharp.Compiler.Hosted\FSharp.Compiler.Hosted.fsproj"/>
-    <ProjectReference Include="..\FSharp.Compiler.Hosted\FSharp.Compiler.Hosted.fsproj">
-      <Project>{4fae092e-5366-43f5-85fa-71eaf66fa4a8}</Project>
-      <Name>FSharp.Core</Name>
-    </ProjectReference>
     <Reference Include="mscorlib" />
     <Reference Include="System" />
     <Reference Include="System.Core" />
@@ -60,4 +51,13 @@
     </ProjectReference>
   </ItemGroup>
   <Import Project="$(FSharpSourcesRoot)\FSharpSource.targets" />
+
+    <Target Name="CopyToBuiltBin" BeforeTargets="BuiltProjectOutputGroup" AfterTargets="CoreCompile" >
+        <ItemGroup>
+            <BuiltProjectOutputGroupKeyOutput Include="$(FSharpSourcesRoot)\..\$(Configuration)\net40\bin\FSharp.Core.sigdata" />
+            <BuiltProjectOutputGroupKeyOutput Include="$(FSharpSourcesRoot)\..\$(Configuration)\net40\bin\FSharp.Core.optdata" />
+        </ItemGroup>
+        <Copy SourceFiles="$(FSharpSourcesRoot)\..\$(Configuration)\net40\bin\FSharp.Core.sigdata" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" />
+        <Copy SourceFiles="$(FSharpSourcesRoot)\..\$(Configuration)\net40\bin\FSharp.Core.optdata" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" />
+    </Target>
 </Project>

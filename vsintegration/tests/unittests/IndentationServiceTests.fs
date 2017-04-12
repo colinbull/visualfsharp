@@ -11,7 +11,7 @@ open Microsoft.CodeAnalysis.Editor
 open Microsoft.CodeAnalysis.Text
 open Microsoft.VisualStudio.FSharp.Editor
 
-[<TestFixture>]
+[<TestFixture>][<Category "Roslyn Services">]
 type IndentationServiceTests()  =
 
     static let tabSize = 4
@@ -34,7 +34,9 @@ type Class1() =
     static let nestedTypesTemplate = "
 namespace testspace
     type testtype
-        static member testmember = 1"
+        static member testmember = 1
+
+"
     
     static member private testCases: Object[][] = [|
         [| None;     0; consoleProjectTemplate |]
@@ -59,6 +61,7 @@ namespace testspace
         [| Some(0);  2; nestedTypesTemplate |]
         [| Some(4);  3; nestedTypesTemplate |]
         [| Some(8);  4; nestedTypesTemplate |]
+        [| Some(8);  5; nestedTypesTemplate |]
     |]
 
     [<TestCaseSource("testCases")>]

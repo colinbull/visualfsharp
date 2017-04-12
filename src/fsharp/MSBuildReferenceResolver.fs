@@ -9,7 +9,7 @@ module internal Microsoft.FSharp.Compiler.MSBuildReferenceResolver
 #if FX_RESHAPED_REFLECTION
     open Microsoft.FSharp.Core.ReflectionAdapters
 #endif
-#if RESHAPED_MSBUILD
+#if FX_RESHAPED_MSBUILD
     open Microsoft.FSharp.Compiler.MsBuildAdapters
     open Microsoft.FSharp.Compiler.ToolLocationHelper
 #endif
@@ -70,11 +70,13 @@ module internal Microsoft.FSharp.Compiler.MSBuildReferenceResolver
     //[<Literal>]    
     //let private Net452 = "v4.5.2" // not available in Dev15 MSBuild version
 
+#if MSBUILD_AT_LEAST_14
     [<Literal>]    
     let private Net46 = "v4.6"
 
     [<Literal>]    
     let private Net461 = "v4.6.1"
+#endif
 
     /// Get the path to the .NET Framework implementation assemblies by using ToolLocationHelper.GetPathToDotNetFramework.
     /// This is only used to specify the "last resort" path for assembly resolution.
@@ -88,9 +90,11 @@ module internal Microsoft.FSharp.Compiler.MSBuildReferenceResolver
             | Net40 ->  Some TargetDotNetFrameworkVersion.Version40
             | Net45 ->  Some TargetDotNetFrameworkVersion.Version45
             | Net451 -> Some TargetDotNetFrameworkVersion.Version451
+#if MSBUILD_AT_LEAST_14
             //| Net452 -> Some TargetDotNetFrameworkVersion.Version452 // not available in Dev15 MSBuild version
             | Net46 -> Some TargetDotNetFrameworkVersion.Version46
             | Net461 -> Some TargetDotNetFrameworkVersion.Version461
+#endif
             | _ -> assert false; None
         match v with
         | Some v -> 
@@ -100,7 +104,7 @@ module internal Microsoft.FSharp.Compiler.MSBuildReferenceResolver
         | _ -> []
 
     let GetPathToDotNetFrameworkReferenceAssembliesFor40Plus(version) = 
-#if CROSS_PLATFORM_COMPILER // || !RESHAPED_MSBUILD
+#if ENABLE_MONO_SUPPORT // || !FX_RESHAPED_MSBUILD
       match ToolLocationHelper.GetPathToStandardLibraries(".NETFramework",version,"") with
       | null | "" -> []
       | x -> [x]
@@ -128,13 +132,19 @@ module internal Microsoft.FSharp.Compiler.MSBuildReferenceResolver
 
     /// Use MSBuild to determine the version of the highest installed framework.
     let HighestInstalledNetFrameworkVersion() =
+      try
+#if MSBUILD_AT_LEAST_14
         if box (ToolLocationHelper.GetPathToDotNetFramework(TargetDotNetFrameworkVersion.Version461)) <> null then Net461
         elif box (ToolLocationHelper.GetPathToDotNetFramework(TargetDotNetFrameworkVersion.Version46)) <> null then Net46
         // 4.5.2 enumeration is not available in Dev15 MSBuild version
         //elif box (ToolLocationHelper.GetPathToDotNetFramework(TargetDotNetFrameworkVersion.Version452)) <> null then Net452 
         elif box (ToolLocationHelper.GetPathToDotNetFramework(TargetDotNetFrameworkVersion.Version451)) <> null then Net451 
+#else
+        if box (ToolLocationHelper.GetPathToDotNetFramework(TargetDotNetFrameworkVersion.Version451)) <> null then Net451 
+#endif
         elif box (ToolLocationHelper.GetPathToDotNetFramework(TargetDotNetFrameworkVersion.Version45)) <> null then Net45 
-        else Net40 // version is 4.0 assumed since this code is running. 
+        else Net45 // version is 4.0 assumed since this code is running. 
+      with _ -> Net45
 
     /// Derive the target framework directories.        
     let DeriveTargetFrameworkDirectories (targetFrameworkVersion:string, logMessage) =
@@ -214,7 +224,7 @@ module internal Microsoft.FSharp.Compiler.MSBuildReferenceResolver
             lineIfExists resolvedPath
             + lineIfExists fusionName  
 
-    /// Perform assembly resolution by instantiating the ResolveAssemblyReference task directly from the MSBuild SDK.
+    /// Perform assembly resolution by instantiating the ResolveAssembly task directly from the MSBuild SDK.
     let ResolveCore(resolutionEnvironment: ResolutionEnvironment,
                     references:(string*(*baggage*)string)[], 
                     targetFrameworkVersion: string, 
@@ -225,7 +235,7 @@ module internal Microsoft.FSharp.Compiler.MSBuildReferenceResolver
                     implicitIncludeDir: string,
                     allowRawFileName: bool,
                     logMessage: (string -> unit), 
-                    logErrorOrWarning: (bool -> string -> string -> unit)) =
+                    logDiagnostic: (bool -> string -> string -> unit)) =
                       
         let frameworkRegistryBase, assemblyFoldersSuffix, assemblyFoldersConditions = 
           "Software\Microsoft\.NetFramework", "AssemblyFoldersEx" , ""              
@@ -241,16 +251,16 @@ module internal Microsoft.FSharp.Compiler.MSBuildReferenceResolver
         let engine = 
             { new IBuildEngine with 
               member __.BuildProjectFile(projectFileName, targetNames, globalProperties, targetOutputs) = true
-#if RESHAPED_MSBUILD 
+#if FX_RESHAPED_MSBUILD 
               member __.LogCustomEvent(e) =  protect (fun () -> logMessage ((e.GetPropertyValue("Message")) :?> string))
-              member __.LogErrorEvent(e) =   protect (fun () -> logErrorOrWarning true ((e.GetPropertyValue("Code")) :?> string) ((e.GetPropertyValue("Message")) :?> string))
+              member __.LogErrorEvent(e) =   protect (fun () -> logDiagnostic true ((e.GetPropertyValue("Code")) :?> string) ((e.GetPropertyValue("Message")) :?> string))
               member __.LogMessageEvent(e) = protect (fun () -> logMessage ((e.GetPropertyValue("Message")) :?> string))
-              member __.LogWarningEvent(e) = protect (fun () -> logErrorOrWarning false ((e.GetPropertyValue("Code")) :?> string)  ((e.GetPropertyValue("Message")) :?> string))
+              member __.LogWarningEvent(e) = protect (fun () -> logDiagnostic false ((e.GetPropertyValue("Code")) :?> string)  ((e.GetPropertyValue("Message")) :?> string))
 #else 
               member __.LogCustomEvent(e) =  protect (fun () -> logMessage e.Message)
-              member __.LogErrorEvent(e) =   protect (fun () -> logErrorOrWarning true e.Code e.Message)
+              member __.LogErrorEvent(e) =   protect (fun () -> logDiagnostic true e.Code e.Message)
               member __.LogMessageEvent(e) = protect (fun () -> logMessage e.Message)
-              member __.LogWarningEvent(e) = protect (fun () -> logErrorOrWarning false e.Code e.Message)
+              member __.LogWarningEvent(e) = protect (fun () -> logDiagnostic false e.Code e.Message)
 #endif 
               member __.ColumnNumberOfTaskNode with get() = 1 
               member __.LineNumberOfTaskNode with get() = 1 
@@ -298,7 +308,7 @@ module internal Microsoft.FSharp.Compiler.MSBuildReferenceResolver
              |]    
             
         let assemblies = 
-#if RESHAPED_MSBUILD
+#if FX_RESHAPED_MSBUILD
             ignore references
             [||]
 #else
@@ -318,7 +328,7 @@ module internal Microsoft.FSharp.Compiler.MSBuildReferenceResolver
 #else
         rar.TargetProcessorArchitecture <- targetProcessorArchitecture
         let targetedRuntimeVersionValue = typeof<obj>.Assembly.ImageRuntimeVersion
-#if CROSS_PLATFORM_COMPILER
+#if ENABLE_MONO_SUPPORT
         // The properties TargetedRuntimeVersion and CopyLocalDependenciesWhenParentReferenceInGac 
         // are not available on Mono. So we only set them if available (to avoid a compile-time dependency). 
         if not Microsoft.FSharp.Compiler.AbstractIL.IL.runningOnMono then  
@@ -353,7 +363,7 @@ module internal Microsoft.FSharp.Compiler.MSBuildReferenceResolver
 
            /// Perform the resolution on rooted and unrooted paths, and then combine the results.
            member __.Resolve(resolutionEnvironment, references, targetFrameworkVersion, targetFrameworkDirectories, targetProcessorArchitecture,                
-                             fsharpCoreDir, explicitIncludeDirs, implicitIncludeDir, logMessage, logErrorOrWarning) =
+                             fsharpCoreDir, explicitIncludeDirs, implicitIncludeDir, logMessage, logDiagnostic) =
 
                 // The {RawFileName} target is 'dangerous', in the sense that is uses <c>Directory.GetCurrentDirectory()</c> to resolve unrooted file paths.
                 // It is unreliable to use this mutable global state inside Visual Studio.  As a result, we partition all references into a "rooted" set
@@ -375,9 +385,9 @@ module internal Microsoft.FSharp.Compiler.MSBuildReferenceResolver
 
                 let rooted, unrooted = references |> Array.partition (fst >> FileSystem.IsPathRootedShim)
 
-                let rootedResults = ResolveCore(resolutionEnvironment, rooted,  targetFrameworkVersion, targetFrameworkDirectories, targetProcessorArchitecture, fsharpCoreDir, explicitIncludeDirs, implicitIncludeDir, true, logMessage, logErrorOrWarning)
+                let rootedResults = ResolveCore(resolutionEnvironment, rooted,  targetFrameworkVersion, targetFrameworkDirectories, targetProcessorArchitecture, fsharpCoreDir, explicitIncludeDirs, implicitIncludeDir, true, logMessage, logDiagnostic)
 
-                let unrootedResults = ResolveCore(resolutionEnvironment, unrooted,  targetFrameworkVersion, targetFrameworkDirectories, targetProcessorArchitecture, fsharpCoreDir, explicitIncludeDirs, implicitIncludeDir, false, logMessage, logErrorOrWarning)
+                let unrootedResults = ResolveCore(resolutionEnvironment, unrooted,  targetFrameworkVersion, targetFrameworkDirectories, targetProcessorArchitecture, fsharpCoreDir, explicitIncludeDirs, implicitIncludeDir, false, logMessage, logDiagnostic)
 
                 // now unify the two sets of results
                 Array.concat [| rootedResults; unrootedResults |]

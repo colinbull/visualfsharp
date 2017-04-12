@@ -14,10 +14,10 @@ open System.IO
 open System.Runtime.InteropServices
 open System.Collections.Generic
 open Internal.Utilities
+open Internal.Utilities.Collections
 open Microsoft.FSharp.Compiler.AbstractIL 
 open Microsoft.FSharp.Compiler.AbstractIL.Internal 
-#if FX_NO_PDB_READER
-#else
+#if !FX_NO_PDB_READER
 open Microsoft.FSharp.Compiler.AbstractIL.Internal.Support 
 #endif
 open Microsoft.FSharp.Compiler.AbstractIL.Diagnostics 
@@ -1484,7 +1484,7 @@ let dataEndPoints ctxtH =
                   let rva = ctxt.resourcesAddr + offset
                   res := ("manifest resource", rva) :: !res
             !res
-        if List.isEmpty dataStartPoints then [] 
+        if isNil dataStartPoints then [] 
         else
           let methodRVAs = 
               let res = ref []
@@ -1506,9 +1506,7 @@ let dataEndPoints ctxtH =
                 @ (if ctxt.strongnameAddr = 0x0 then [] else [("managed strongname",ctxt.strongnameAddr) ])
                 @ (if ctxt.vtableFixupsAddr = 0x0 then [] else [("managed vtable_fixups",ctxt.vtableFixupsAddr) ])
                 @ methodRVAs)))
-           // Make distinct 
-           |> Set.ofList
-           |> Set.toList
+           |> List.distinct
            |> List.sort 
       
 
@@ -1869,7 +1867,7 @@ and seekReadTypeDefOrRefAsTypeRef ctxt (TaggedIndex(tag,idx) ) =
     | tag when tag = tdor_TypeRef -> seekReadTypeRef ctxt idx
     | tag when tag = tdor_TypeSpec -> 
         dprintn ("type spec used where a type ref or def ctxt.is required")
-        ctxt.ilg.tref_Object
+        ctxt.ilg.typ_Object.TypeRef
     | _ -> failwith "seekReadTypeDefOrRefAsTypeRef_readTypeDefOrRefOrSpec"
 
 and seekReadMethodRefParent ctxt numtypars (TaggedIndex(tag,idx)) =
@@ -1985,20 +1983,20 @@ and sigptrGetTy ctxt numtypars bytes sigptr =
     let b0,sigptr = sigptrGetByte bytes sigptr
     if b0 = et_OBJECT then ctxt.ilg.typ_Object , sigptr
     elif b0 = et_STRING then ctxt.ilg.typ_String, sigptr
-    elif b0 = et_I1 then ctxt.ilg.typ_int8, sigptr
-    elif b0 = et_I2 then ctxt.ilg.typ_int16, sigptr
-    elif b0 = et_I4 then ctxt.ilg.typ_int32, sigptr
-    elif b0 = et_I8 then ctxt.ilg.typ_int64, sigptr
+    elif b0 = et_I1 then ctxt.ilg.typ_SByte, sigptr
+    elif b0 = et_I2 then ctxt.ilg.typ_Int16, sigptr
+    elif b0 = et_I4 then ctxt.ilg.typ_Int32, sigptr
+    elif b0 = et_I8 then ctxt.ilg.typ_Int64, sigptr
     elif b0 = et_I then ctxt.ilg.typ_IntPtr, sigptr
-    elif b0 = et_U1 then ctxt.ilg.typ_uint8, sigptr
-    elif b0 = et_U2 then ctxt.ilg.typ_uint16, sigptr
-    elif b0 = et_U4 then ctxt.ilg.typ_uint32, sigptr
-    elif b0 = et_U8 then ctxt.ilg.typ_uint64, sigptr
+    elif b0 = et_U1 then ctxt.ilg.typ_Byte, sigptr
+    elif b0 = et_U2 then ctxt.ilg.typ_UInt16, sigptr
+    elif b0 = et_U4 then ctxt.ilg.typ_UInt32, sigptr
+    elif b0 = et_U8 then ctxt.ilg.typ_UInt64, sigptr
     elif b0 = et_U then ctxt.ilg.typ_UIntPtr, sigptr
-    elif b0 = et_R4 then ctxt.ilg.typ_float32, sigptr
-    elif b0 = et_R8 then ctxt.ilg.typ_float64, sigptr
-    elif b0 = et_CHAR then ctxt.ilg.typ_char, sigptr
-    elif b0 = et_BOOLEAN then ctxt.ilg.typ_bool, sigptr
+    elif b0 = et_R4 then ctxt.ilg.typ_Single, sigptr
+    elif b0 = et_R8 then ctxt.ilg.typ_Double, sigptr
+    elif b0 = et_CHAR then ctxt.ilg.typ_Char, sigptr
+    elif b0 = et_BOOLEAN then ctxt.ilg.typ_Bool, sigptr
     elif b0 = et_WITH then 
         let b0,sigptr = sigptrGetByte bytes sigptr
         let tdorIdx, sigptr = sigptrGetTypeDefOrRefOrSpecIdx bytes sigptr
@@ -2044,9 +2042,8 @@ and sigptrGetTy ctxt numtypars bytes sigptr =
         
     elif b0 = et_VOID then ILType.Void, sigptr
     elif b0 = et_TYPEDBYREF then 
-        match ctxt.ilg.typ_TypedReference with
-        | Some t -> t, sigptr
-        | _ -> failwith "system runtime doesn't contain System.TypedReference"
+        let t = mkILNonGenericValueTy(mkILTyRef(ctxt.ilg.primaryAssemblyScopeRef,"System.TypedReference"))
+        t, sigptr
     elif b0 = et_CMOD_REQD || b0 = et_CMOD_OPT  then 
         let tdorIdx, sigptr = sigptrGetTypeDefOrRefOrSpecIdx bytes sigptr
         let typ, sigptr = sigptrGetTy ctxt numtypars bytes sigptr
@@ -3250,8 +3247,7 @@ and seekReadTopExportedTypes ctxt () =
            done
            List.rev !res)
 
-#if FX_NO_PDB_READER
-#else         
+#if !FX_NO_PDB_READER
 let getPdbReader opts infile =  
     match opts.pdbPath with 
     | None -> None
@@ -3969,10 +3965,10 @@ let OpenILModuleReader infile opts =
           dispose = (fun () -> 
             ClosePdbReader pdb) }
 
-// ++GLOBAL MUTABLE STATE
-let ilModuleReaderCache = 
-    new Internal.Utilities.Collections.AgedLookup<(string * System.DateTime),ILModuleReader>(0, areSame=(fun (x,y) -> x = y))
-
+// ++GLOBAL MUTABLE STATE (concurrency safe via locking)
+type ILModuleReaderCacheLockToken() = interface LockToken
+let ilModuleReaderCache = new AgedLookup<ILModuleReaderCacheLockToken, (string * System.DateTime), ILModuleReader>(0, areSame=(fun (x,y) -> x = y))
+let ilModuleReaderCacheLock = Lock()
 
 let OpenILModuleReaderAfterReadingAllBytes infile opts = 
     // Pseudo-normalize the paths.
@@ -3984,7 +3980,7 @@ let OpenILModuleReaderAfterReadingAllBytes infile opts =
     let cacheResult = 
         if not succeeded then None // Fall back to uncached.
         else if opts.pdbPath.IsSome then None // can't used a cached entry when reading PDBs, since it makes the returned object IDisposable
-        else ilModuleReaderCache.TryGet(key) 
+        else ilModuleReaderCacheLock.AcquireLock (fun ltok -> ilModuleReaderCache.TryGet(ltok, key))
     match cacheResult with 
     | Some(ilModuleReader) -> ilModuleReader
     | None -> 
@@ -3995,7 +3991,7 @@ let OpenILModuleReaderAfterReadingAllBytes infile opts =
               ilAssemblyRefs = ilAssemblyRefs
               dispose = (fun () -> ClosePdbReader pdb) }
         if Option.isNone pdb && succeeded then 
-            ilModuleReaderCache.Put(key, ilModuleReader)
+            ilModuleReaderCacheLock.AcquireLock (fun ltok -> ilModuleReaderCache.Put(ltok, key, ilModuleReader))
         ilModuleReader
 
 let OpenILModuleReaderFromBytes fileNameForDebugOutput bytes opts = 

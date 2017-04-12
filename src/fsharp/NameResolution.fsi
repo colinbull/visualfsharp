@@ -201,7 +201,7 @@ type internal CapturedNameResolution =
     /// Named item
     member Item : Item
 
-    /// Information about the occurence of the symbol
+    /// Information about the occurrence of the symbol
     member ItemOccurence : ItemOccurence
 
     /// Information about printing. For example, should redundant keywords be hidden?
@@ -278,7 +278,7 @@ type internal TcResultsSinkImpl =
     /// Get all the resolutions reported to the sink
     member GetResolutions : unit -> TcResolutions
 
-    /// Get all the uses of all symbols remorted to the sink
+    /// Get all the uses of all symbols reported to the sink
     member GetSymbolUses : unit -> TcSymbolUses
     interface ITypecheckResultsSink
 
@@ -347,8 +347,14 @@ type PermitDirectReferenceToGeneratedType =
     | Yes 
     | No
 
+/// Indicates if we only need one result or all possible results from a resolution.
+[<RequireQualifiedAccess>]
+type ResultCollectionSettings =
+| AllResults
+| AtMostOneResult
+
 /// Resolve a long identifier to a namespace or module.
-val internal ResolveLongIndentAsModuleOrNamespace   : Import.ImportMap -> range -> FullyQualifiedFlag -> NameResolutionEnv -> AccessorDomain -> Ident list -> ResultOrException<(int * ModuleOrNamespaceRef * ModuleOrNamespaceType) list >
+val internal ResolveLongIndentAsModuleOrNamespace   : ResultCollectionSettings -> Import.ImportMap -> range -> FullyQualifiedFlag -> NameResolutionEnv -> AccessorDomain -> Ident list -> ResultOrException<(int * ModuleOrNamespaceRef * ModuleOrNamespaceType) list >
 
 /// Resolve a long identifier to an object constructor.
 val internal ResolveObjectConstructor               : NameResolver -> DisplayEnv -> range -> AccessorDomain -> TType -> ResultOrException<Item>
@@ -401,6 +407,9 @@ val internal ResolveExprDotLongIdentAndComputeRange : TcResultsSink -> NameResol
 /// A generator of type instantiations used when no more specific type instantiation is known.
 val FakeInstantiationGenerator : range -> Typar list -> TType list
 
+/// Try to resolve a long identifier as type.
+val TryToResolveLongIdentAsType : NameResolver -> NameResolutionEnv -> range -> string list -> TType option
+
 /// Resolve a (possibly incomplete) long identifier to a set of possible resolutions.
 val ResolvePartialLongIdent : NameResolver -> NameResolutionEnv -> (MethInfo -> TType -> bool) -> range -> AccessorDomain -> string list -> bool -> Item list
 
@@ -411,3 +420,6 @@ type ResolveCompletionTargets =
 
 /// Resolve a (possibly incomplete) long identifier to a set of possible resolutions, qualified by type.
 val ResolveCompletionsInType       : NameResolver -> NameResolutionEnv -> ResolveCompletionTargets -> Range.range -> AccessorDomain -> bool -> TType -> Item list
+
+
+val IsItemResolvable : NameResolver -> NameResolutionEnv -> range -> AccessorDomain -> string list -> Item -> bool

@@ -37,6 +37,10 @@ namespace Microsoft.FSharp.Text.StructuredFormat
     /// Data representing structured layouts of terms.  
 #if RUNTIME  // FSharp.Core.dll makes things internal and hides representations
     type internal Layout
+    type internal LayoutTag
+    type internal TaggedText =
+        abstract Tag: LayoutTag
+        abstract Text: string
 #else  // FSharp.Compiler.dll, FSharp.Compiler-proto.dll, FSharp.PowerPack.dll
     // FSharp.PowerPack.dll: reveals representations
     // FSharp.Compiler-proto.dll, FSharp.Compiler.dll: the F# compiler likes to see these representations
@@ -52,6 +56,63 @@ namespace Microsoft.FSharp.Text.StructuredFormat
         | Unbreakable
         | Breakable of int
         | Broken of int
+    
+    [<StructuralEquality; NoComparison>]
+#if COMPILER
+    type internal LayoutTag =
+#else
+    type LayoutTag =
+#endif
+        | ActivePatternCase
+        | ActivePatternResult
+        | Alias
+        | Class
+        | Union
+        | UnionCase
+        | Delegate
+        | Enum
+        | Event
+        | Field
+        | Interface
+        | Keyword
+        | LineBreak
+        | Local
+        | Record
+        | RecordField
+        | Method
+        | Member
+        | ModuleBinding
+        | Module
+        | Namespace
+        | NumericLiteral
+        | Operator
+        | Parameter
+        | Property
+        | Space
+        | StringLiteral
+        | Struct
+        | TypeParameter
+        | Text
+        | Punctuation
+        | UnknownType
+        | UnknownEntity
+
+#if COMPILER
+    type internal TaggedText =
+#else
+    type TaggedText =
+#endif
+        abstract Tag : LayoutTag
+        abstract Text : string
+
+    
+#if COMPILER
+    type internal TaggedTextWriter =
+#else
+    type TaggedTextWriter =
+#endif
+        abstract Write: t: TaggedText -> unit
+        abstract WriteLine: unit -> unit
 
     /// Data representing structured layouts of terms.  The representation
     /// of this data type is only for the consumption of formatting engines.
@@ -61,11 +122,63 @@ namespace Microsoft.FSharp.Text.StructuredFormat
 #else
     type Layout =
 #endif
-     | Leaf of bool * obj * bool
+     | ObjLeaf of bool * obj * bool
+     | Leaf of bool * TaggedText * bool
      | Node of bool * Layout * bool * Layout * bool * Joint
      | Attr of string * (string * string) list * Layout
 #endif
 
+    module
+#if RUNTIME || COMPILER
+        internal
+#else
+#endif
+            TaggedTextOps =
+        val tag : LayoutTag -> string -> TaggedText
+        val keywordFunctions : Set<string>
+        val tagAlias : string -> TaggedText
+        val tagClass : string -> TaggedText
+        val tagUnionCase : string -> TaggedText
+        val tagDelegate : string -> TaggedText
+        val tagEnum : string -> TaggedText
+        val tagEvent : string -> TaggedText
+        val tagField : string -> TaggedText
+        val tagInterface : string -> TaggedText
+        val tagKeyword : string -> TaggedText
+        val tagLineBreak : string -> TaggedText
+        val tagMethod : string -> TaggedText
+        val tagModuleBinding : string -> TaggedText
+        val tagLocal : string -> TaggedText
+        val tagRecord : string -> TaggedText
+        val tagRecordField : string -> TaggedText
+        val tagModule : string -> TaggedText
+        val tagNamespace : string -> TaggedText
+        val tagNumericLiteral : string -> TaggedText
+        val tagOperator : string -> TaggedText
+        val tagParameter : string -> TaggedText
+        val tagProperty : string -> TaggedText
+        val tagSpace : string -> TaggedText
+        val tagStringLiteral : string -> TaggedText
+        val tagStruct : string -> TaggedText
+        val tagTypeParameter : string -> TaggedText
+        val tagText : string -> TaggedText
+        val tagPunctuation : string -> TaggedText
+
+        module Literals =
+            // common tagged literals
+            val lineBreak : TaggedText
+            val space : TaggedText
+            val comma : TaggedText
+            val semicolon : TaggedText
+            val leftParen : TaggedText
+            val rightParen : TaggedText
+            val leftBracket : TaggedText
+            val rightBracket : TaggedText
+            val leftBrace: TaggedText
+            val rightBrace : TaggedText
+            val equals : TaggedText
+            val arrow : TaggedText
+            val questionMark : TaggedText
 
 #if RUNTIME   // FSharp.Core.dll doesn't use PrintIntercepts
 #else  // FSharp.Compiler.dll, FSharp.Compiler-proto.dll, FSharp.PowerPack.dll
@@ -106,20 +219,20 @@ namespace Microsoft.FSharp.Text.StructuredFormat
         val emptyL     : Layout
         /// Is it the empty layout?
         val isEmptyL   : layout:Layout -> bool
-        
+
         /// An uninterpreted leaf, to be interpreted into a string
         /// by the layout engine. This allows leaf layouts for numbers, strings and
         /// other atoms to be customized according to culture.
         val objL       : value:obj -> Layout
 
         /// An string leaf 
-        val wordL      : text:string -> Layout
+        val wordL      : text:TaggedText -> Layout
         /// An string which requires no spaces either side.
-        val sepL       : text:string -> Layout
+        val sepL       : text:TaggedText -> Layout
         /// An string which is right parenthesis (no space on the left).
-        val rightL     : text:string -> Layout
+        val rightL     : text:TaggedText -> Layout
         /// An string which is left  parenthesis (no space on the right).
-        val leftL      : text:string -> Layout
+        val leftL      : text:TaggedText -> Layout
 
         /// Join, unbreakable. 
         val ( ^^ )     : layout1:Layout -> layout2:Layout -> Layout   
@@ -251,24 +364,26 @@ namespace Microsoft.FSharp.Text.StructuredFormat
         ///
         /// Data from other .NET languages is formatted using a virtual
         /// call to Object.ToString() on the boxed version of the input.
-        val any_to_string: value:'T -> string
+        val any_to_string: value:'T * Type -> string
 
         /// Output any value to a channel using the same set of formatting rules
         /// as any_to_string
-        val output_any: writer:TextWriter -> value:'T -> unit
+        val output_any: writer:TextWriter -> value:'T * Type -> unit
 
 #if RUNTIME   // FSharp.Core.dll: Most functions aren't needed in FSharp.Core.dll, but we add one entry for printf
 
 #if FX_RESHAPED_REFLECTION
-        val anyToStringForPrintf: options:FormatOptions -> showNonPublicMembers : bool -> value:'T -> string
+        val anyToStringForPrintf: options:FormatOptions -> showNonPublicMembers : bool -> value:'T * Type -> string
 #else
-        val anyToStringForPrintf: options:FormatOptions -> bindingFlags:System.Reflection.BindingFlags -> value:'T -> string
+        val anyToStringForPrintf: options:FormatOptions -> bindingFlags:System.Reflection.BindingFlags -> value:'T * Type -> string
 #endif
 #else
-        val any_to_layout   : options:FormatOptions -> value:'T -> Layout
+        val asTaggedTextWriter: writer: TextWriter -> TaggedTextWriter
+        val any_to_layout   : options:FormatOptions -> value:'T * Type -> Layout
         val squash_layout   : options:FormatOptions -> layout:Layout -> Layout
+        val output_layout_tagged   : options:FormatOptions -> writer:TaggedTextWriter -> layout:Layout -> unit
         val output_layout   : options:FormatOptions -> writer:TextWriter -> layout:Layout -> unit
-        val layout_as_string: options:FormatOptions -> value:'T -> string
+        val layout_as_string: options:FormatOptions -> value:'T * Type -> string
 #endif
 
         /// Convert any value to a layout using the given formatting options.  The
@@ -279,5 +394,5 @@ namespace Microsoft.FSharp.Text.StructuredFormat
 
 
 #if COMPILER
-        val fsi_any_to_layout : options:FormatOptions -> value:'T -> Layout
+        val fsi_any_to_layout : options:FormatOptions -> value:'T * Type -> Layout
 #endif  

@@ -12,7 +12,8 @@ open UnitTests.TestLib.Utils
 open UnitTests.TestLib.LanguageService
 open UnitTests.TestLib.ProjectSystem
 
-[<TestFixture>] 
+[<TestFixture>]
+[<Category "LanguageService">]
 type UsingMSBuild() as this = 
     inherit LanguageServiceBaseTests() 
 
@@ -72,14 +73,17 @@ type UsingMSBuild() as this =
                 printf "  message = <<<%s> \n" e.Message 
             AssertEqual(0,count)
 
-    let AssertExactlyOneErrorSeenContaining(project:OpenProject,text) =
+    let AssertExactlyCountErrorSeenContaining(project:OpenProject,text,expectedCount) =
         let nMatching = (GetErrors(project)) |> List.filter (fun e ->e.ToString().Contains(text)) |> List.length
         match nMatching with
         | 0 -> 
             failwith (sprintf "No errors containing \"%s\"" text)
-        | 1 -> ()
+        | x when x = expectedCount -> ()
         | _ -> 
             failwith (sprintf "Multiple errors containing \"%s\"" text)
+
+    let AssertExactlyOneErrorSeenContaining(project:OpenProject,text) =
+        AssertExactlyCountErrorSeenContaining(project,text,1)
 
     /// Assert that a given squiggle is an Error (or warning) containing the given text        
     let AssertSquiggleIsErrorContaining,AssertSquiggleIsWarningContaining, AssertSquiggleIsErrorNotContaining,AssertSquiggleIsWarningNotContaining =         
@@ -155,7 +159,7 @@ type UsingMSBuild() as this =
                                        "#r \"Nonexistent\""
                                        ]
         let (project, _) = createSingleFileFsxFromLines code
-        AssertExactlyOneErrorSeenContaining(project, "Nonexistent")   // ...and not an error on the first line.
+        AssertExactlyCountErrorSeenContaining(project, "Nonexistent", 2)   // ...and not an error on the first line.
         
     [<Test>]
     member public this.``Fsx.InvalidHashLoad.ShouldBeASquiggle.Bug3012``() =  
@@ -324,7 +328,7 @@ type UsingMSBuild() as this =
 
         MoveCursorToEndOfMarker(fsx, "InDifferentFS.")
         let completion = AutoCompleteAtCursor fsx
-        let completion = completion |> Array.map (fun (name, _, _, _) -> name) |> set
+        let completion = completion |> Array.map (fun (CompletionItem(name, _, _, _, _)) -> name) |> set
         Assert.AreEqual(Set.count completion, 2, "Expected 2 elements in the completion list")
         Assert.IsTrue(completion.Contains "x", "Completion list should contain x because INTERACTIVE is defined")
         Assert.IsTrue(completion.Contains "B", "Completion list should contain B because DEBUG is not defined")
@@ -1204,11 +1208,7 @@ type UsingMSBuild() as this =
     member public this.``Fsx.HashReferenceAgainstStrongName``() = 
         let code =
                                             ["#light"
-#if FX_ATLEAST_40                                            
                                              sprintf "#reference \"System.Core, Version=%s, Culture=neutral, PublicKeyToken=b77a5c561934e089\"" (System.Environment.Version.ToString())
-#else
-                                             "#reference \"System.Core, Version=3.5.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089\""
-#endif                                             
                                              "open System."]
         let (_, file) = createSingleFileFsxFromLines code
         MoveCursorToEndOfMarker(file,"open System.") 
@@ -1345,7 +1345,7 @@ type UsingMSBuild() as this =
 #if VS_VERSION_DEV15
             "4.4.1.0"
 #endif
-        let binariesFolder = match Internal.Utilities.FSharpEnvironment.BinFolderOfDefaultFSharpCompiler with
+        let binariesFolder = match Internal.Utilities.FSharpEnvironment.BinFolderOfDefaultFSharpCompiler(None) with
                              | Some(x) -> x
                              | None -> failwith "Location of binaries folder cannot be found"
 
@@ -1583,7 +1583,7 @@ type UsingMSBuild() as this =
                                      ]
         let refs = 
             [
-                PathRelativeToTestAssembly(@"UnitTestsResources\MockTypeProviders\DummyProviderForLanguageServiceTesting.dll")
+                PathRelativeToTestAssembly(@"UnitTests\MockTypeProviders\DummyProviderForLanguageServiceTesting.dll")
             ]
         let (_, project, file) = this.CreateSingleFileProject(code, references = refs)
         TakeCoffeeBreak(this.VS)
@@ -1591,7 +1591,7 @@ type UsingMSBuild() as this =
 
     member public this.TypeProviderDisposalSmokeTest(clearing) =
         use _guard = this.UsingNewVS()
-        let providerAssemblyName = PathRelativeToTestAssembly(@"UnitTestsResources\MockTypeProviders\DummyProviderForLanguageServiceTesting.dll")
+        let providerAssemblyName = PathRelativeToTestAssembly(@"UnitTests\MockTypeProviders\DummyProviderForLanguageServiceTesting.dll")
         let providerAssembly = System.Reflection.Assembly.LoadFrom providerAssemblyName
         Assert.IsNotNull(providerAssembly, "provider assembly should not be null")
         let providerCounters = providerAssembly.GetType("DummyProviderForLanguageServiceTesting.GlobalCounters")
@@ -1631,7 +1631,7 @@ type UsingMSBuild() as this =
         for i in 1 .. 50 do 
             let solution = this.CreateSolution()
             let project = CreateProject(solution,"testproject" + string (i % 20))    
-            this.AddAssemblyReference(project, PathRelativeToTestAssembly(@"UnitTestsResources\MockTypeProviders\DummyProviderForLanguageServiceTesting.dll"))
+            this.AddAssemblyReference(project, PathRelativeToTestAssembly(@"UnitTests\MockTypeProviders\DummyProviderForLanguageServiceTesting.dll"))
             let fileName = sprintf "File%d.fs" i
             let file1 = AddFileFromText(project,fileName, ["let x" + string i + " = N1.T1()" ])    
             let file = OpenFile(project,fileName)

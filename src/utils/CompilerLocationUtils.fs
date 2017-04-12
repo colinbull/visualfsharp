@@ -56,7 +56,7 @@ module internal FSharpEnvironment =
     // WARNING: Do not change this revision number unless you absolutely know what you're doing.
     let FSharpBinaryMetadataFormatRevision = "2.0.0.0"
 
-#if NO_WIN_REGISTRY
+#if FX_NO_WIN_REGISTRY
 #else
     [<DllImport("Advapi32.dll", CharSet = CharSet.Unicode, BestFitMapping = false)>]
     extern uint32 RegOpenKeyExW(UIntPtr _hKey, string _lpSubKey, uint32 _ulOptions, int _samDesired, UIntPtr & _phkResult);
@@ -77,7 +77,7 @@ module internal FSharpEnvironment =
     // See: ndp\clr\src\BCL\System\IO\Path.cs
     let maxPath = 260;
     let maxDataLength = (new System.Text.UTF32Encoding()).GetMaxByteCount(maxPath)
-#if NO_WIN_REGISTRY
+#if FX_NO_WIN_REGISTRY
 #else
     let KEY_WOW64_DEFAULT = 0x0000
     let KEY_WOW64_32KEY = 0x0200
@@ -93,23 +93,6 @@ module internal FSharpEnvironment =
                 System.Diagnostics.Debug.Assert(false, sprintf "Failed in GetDefaultRegistryStringValueViaDotNet: %s" (e.ToString()))
                 null)
 
-// RegistryView.Registry API is not available before .NET 4.0
-#if FX_ATLEAST_40_COMPILER_LOCATION
-    let Get32BitRegistryStringValueViaDotNet(subKey: string) =
-        Option.ofString
-            (try
-                let key = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry32)
-                match key with
-                | null -> null
-                | _ ->
-                    let sub = key.OpenSubKey(subKey)
-                    match sub with
-                    | null -> null
-                    | _ -> downcast (sub.GetValue(null, null))
-             with e->
-                System.Diagnostics.Debug.Assert(false, sprintf "Failed in Get32BitRegistryStringValueViaDotNet: %s" (e.ToString()))
-                null)
-#endif
 
     let Get32BitRegistryStringValueViaPInvoke(subKey:string) = 
         Option.ofString
@@ -167,21 +150,7 @@ module internal FSharpEnvironment =
 #endif
             s
         else
-#if FX_ATLEAST_40_COMPILER_LOCATION
-            match Get32BitRegistryStringValueViaDotNet(subKey) with
-            | None -> Get32BitRegistryStringValueViaPInvoke(subKey) 
-            | s ->
-#if DEBUG
-                // If we got here AND we're on .NET 4.0 then we can validate that Get32BitRegistryStringValueViaPInvoke(...) works
-                // by comparing against the result from Get32BitRegistryStringValueViaDotNet(...)
-                let viaPinvoke = Get32BitRegistryStringValueViaPInvoke(subKey)
-                System.Diagnostics.Debug.Assert((s = viaPinvoke), sprintf "Non-32bit path: pi=%A def=%A" viaPinvoke s)
-#endif
-                s
-#else
             Get32BitRegistryStringValueViaPInvoke(subKey) 
-#endif
-
 #endif
 
     let internal tryCurrentDomain() =
@@ -219,15 +188,15 @@ module internal FSharpEnvironment =
     //     - default location of fsi.exe in FSharp.VS.FSI.dll
     //     - default location of fsc.exe in FSharp.Compiler.CodeDom.dll
     //     - default F# binaries directory in (project system) Project.fs
-#if NO_WIN_REGISTRY
-    let BinFolderOfDefaultFSharpCompiler = 
+    let BinFolderOfDefaultFSharpCompiler(probePoint:string option) = 
+#if FX_NO_WIN_REGISTRY
+        ignore probePoint
 #if FX_NO_APP_DOMAINS
         Some System.AppContext.BaseDirectory
 #else
-    Some System.AppDomain.CurrentDomain.BaseDirectory
+        Some System.AppDomain.CurrentDomain.BaseDirectory
 #endif
 #else
-    let BinFolderOfDefaultFSharpCompiler = 
         // Check for an app.config setting to redirect the default compiler location
         // Like fsharp-compiler-location
         try 
@@ -236,7 +205,13 @@ module internal FSharpEnvironment =
             match result with 
             | Some _ ->  result 
             | None -> 
-
+            
+                let safeExists f = (try File.Exists(f) with _ -> false)
+                // Look in the probePoint if given, e.g. look for a compiler alongside of FSharp.Build.dll
+                match probePoint with 
+                | Some p when safeExists (Path.Combine(p,"fsc.exe")) || safeExists (Path.Combine(p,"Fsc.exe")) -> Some p 
+                | _ -> 
+                
                 // On windows the location of the compiler is via a registry key
 
                 // Note: If the keys below change, be sure to update code in:
@@ -265,19 +240,12 @@ module internal FSharpEnvironment =
                     match result with 
                     | Some _ ->  result 
                     | None ->
-
-                        // This was failing on rolling build for staging because the prototype compiler doesn't have the key. Disable there.
-#if FX_ATLEAST_40_COMPILER_LOCATION
-                        System.Diagnostics.Debug.Assert(result<>None, sprintf "Could not find location of compiler at '%s' or '%s'" key1 key2)
-#endif
-
                         // For the prototype compiler, we can just use the current domain
                         tryCurrentDomain()
         with e -> 
             System.Diagnostics.Debug.Assert(false, "Error while determining default location of F# compiler")
             None
 
-#if FX_ATLEAST_45
 
     // Apply the given function to the registry entry corresponding to the subkey.
     // The reg key is disposed at the end of the scope.
@@ -291,11 +259,13 @@ module internal FSharpEnvironment =
 
     // Check if the framework version 4.5 or above is installed at the given key entry 
     let IsNetFx45OrAboveInstalledAt subkey =
+      try
         useKey subkey (fun regkey ->
             match regkey with
             | null -> false
             | _ -> regkey.GetValue("Release", 0) :?> int |> (fun s -> s >= 0x50000)) // 0x50000 implies 4.5.0
-
+      with _ -> false
+ 
     // Check if the framework version 4.5 or above is installed
     let IsNetFx45OrAboveInstalled =
         IsNetFx45OrAboveInstalledAt @"SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Client" ||
@@ -307,8 +277,5 @@ module internal FSharpEnvironment =
             let version = new Version(versionOf<System.Int32>) 
             let major = version.Major
             major > 4 || (major = 4 && IsNetFx45OrAboveInstalled)
-#else
-    let IsRunningOnNetFx45OrAbove = false
-#endif
 
 #endif

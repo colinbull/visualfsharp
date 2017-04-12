@@ -24,10 +24,9 @@ type options =
    embedSourceList: string list
    sourceLink: string
    signer : ILStrongNameSigner option
-   fixupOverlappingSequencePoints : bool
    emitTailcalls: bool
    showTimes : bool
    dumpDebugInfo : bool }
 
 /// Write a binary to the file system. Extra configuration parameters can also be specified. 
-val WriteILBinary: filename: string * options:  options * input: ILModuleDef * noDebugData: bool -> unit
+val WriteILBinary: filename: string * options:  options * input: ILModuleDef -> unit

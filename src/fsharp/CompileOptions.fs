@@ -26,11 +26,7 @@ open Microsoft.FSharp.Compiler.AbstractIL.IL
 open Microsoft.FSharp.Compiler.Lib
 open Microsoft.FSharp.Compiler.Range
 open Microsoft.FSharp.Compiler.Lexhelp
-
-#if NO_COMPILER_BACKEND
-#else
 open Microsoft.FSharp.Compiler.IlxGen
-#endif
 
 #if FX_RESHAPED_REFLECTION
 open Microsoft.FSharp.Core.ReflectionAdapters
@@ -40,8 +36,7 @@ module Attributes =
     open System.Runtime.CompilerServices
 
     //[<assembly: System.Security.SecurityTransparent>]
-#if FX_NO_DEFAULT_DEPENDENCY_TYPE
-#else
+#if !FX_NO_DEFAULT_DEPENDENCY_TYPE
     [<Dependency("FSharp.Core",LoadHint.Always)>] 
 #endif
     do()
@@ -122,7 +117,7 @@ let PrintCompilerOption (CompilerOption(_s,_tag,_spec,_,help) as compilerOption)
     printf "%-40s" (compilerOptionUsage compilerOption)
     let printWord column (word:string) =
         // Have printed upto column.
-        // Now print the next word including any preceeding whitespace.
+        // Now print the next word including any preceding whitespace.
         // Returns the column printed to (suited to folding).
         if column + 1 (*space*) + word.Length >= lineWidth then // NOTE: "equality" ensures final character of the line is never printed
           printfn "" (* newline *)
@@ -137,7 +132,7 @@ let PrintCompilerOption (CompilerOption(_s,_tag,_spec,_,help) as compilerOption)
     printfn "" (* newline *)
 
 let PrintPublicOptions (heading,opts) =
-  if not (List.isEmpty opts) then
+  if not (isNil opts) then
     printfn ""
     printfn ""      
     printfn "\t\t%s" heading
@@ -150,7 +145,7 @@ let PrintCompilerOptionBlocks blocks =
     if Set.contains heading doneHeadings then
       doneHeadings
     else
-      let headingOptions = List.filter (fst >> equals heading) publicBlocks |> List.map snd |> List.concat
+      let headingOptions = List.filter (fst >> equals heading) publicBlocks |> List.collect snd
       PrintPublicOptions (heading,headingOptions)
       Set.add heading doneHeadings
   List.fold consider Set.empty publicBlocks |> ignore<Set<string>>
@@ -209,7 +204,7 @@ module ResponseFile =
 
 
 let ParseCompilerOptions (collectOtherArgument : string -> unit, blocks: CompilerOptionBlock list, args) =
-  use unwindBuildPhase = PushThreadBuildPhaseUntilUnwind (BuildPhase.Parameter)
+  use unwindBuildPhase = PushThreadBuildPhaseUntilUnwind BuildPhase.Parameter
   
   let specs = List.collect GetOptionsOfBlock blocks
           
@@ -360,7 +355,7 @@ let ParseCompilerOptions (collectOtherArgument : string -> unit, blocks: Compile
               reportDeprecatedOption d
               let al = getOptionArgList compilerOption argString
               if al <> [] then
-                  List.iter (fun s -> f s) (getOptionArgList compilerOption argString)
+                  List.iter f (getOptionArgList compilerOption argString)
               t
           | (CompilerOption(s, _, OptionStringListSwitch f, d, _) as compilerOption :: _) when getSwitchOpt(optToken) = s -> 
               reportDeprecatedOption d
@@ -471,9 +466,9 @@ let SetDebugSwitch (tcConfigB : TcConfigBuilder) (dtype : string option) (s : Op
     match dtype with
     | Some(s) ->
        match s with 
-       | "portable" ->  tcConfigB.portablePDB <- true ; tcConfigB.embeddedPDB <- false; tcConfigB.jitTracking <- true; tcConfigB.ignoreSymbolStoreSequencePoints <- true
+       | "portable" ->  tcConfigB.portablePDB <- true;  tcConfigB.embeddedPDB <- false; tcConfigB.jitTracking <- false; tcConfigB.ignoreSymbolStoreSequencePoints <- true
        | "pdbonly" ->   tcConfigB.portablePDB <- false; tcConfigB.embeddedPDB <- false; tcConfigB.jitTracking <- false
-       | "embedded" ->  tcConfigB.portablePDB <- true;  tcConfigB.embeddedPDB <- true;  tcConfigB.jitTracking <- true; tcConfigB.ignoreSymbolStoreSequencePoints <- true
+       | "embedded" ->  tcConfigB.portablePDB <- true;  tcConfigB.embeddedPDB <- true;  tcConfigB.jitTracking <- false; tcConfigB.ignoreSymbolStoreSequencePoints <- true
        | "full" ->      tcConfigB.portablePDB <- false; tcConfigB.embeddedPDB <- false; tcConfigB.jitTracking <- true
        | _ -> error(Error(FSComp.SR.optsUnrecognizedDebugType(s), rangeCmdArgs))
     | None ->           tcConfigB.portablePDB <- false; tcConfigB.embeddedPDB <- false; tcConfigB.jitTracking <- s = OptionSwitch.On;
@@ -572,7 +567,7 @@ let errorsAndWarningsFlags (tcConfigB : TcConfigBuilder) =
                                                      else error(Error(FSComp.SR.optsInvalidWarningLevel(n),rangeCmdArgs))), None,
                             Some (FSComp.SR.optsWarn()));
            
-        CompilerOption("nowarn", tagWarnList, OptionStringList (fun n -> tcConfigB.TurnWarningOff(rangeCmdArgs,n)), None,
+        CompilerOption("nowarn", tagWarnList, OptionStringList (fun n -> tcConfigB.TurnWarningOff(rangeCmdArgs, n)), None,
                             Some (FSComp.SR.optsNowarn())); 
 
         CompilerOption("warnon", tagWarnList, OptionStringList (fun n -> tcConfigB.TurnWarningOn(rangeCmdArgs,n)), None,
@@ -743,15 +738,28 @@ let cliRootFlag (_tcConfigB : TcConfigBuilder) =
         CompilerOption("cliroot", tagString, OptionString (fun _  -> ()), Some(DeprecatedCommandLineOptionFull(FSComp.SR.optsClirootDeprecatedMsg(), rangeCmdArgs)),
                            Some(FSComp.SR.optsClirootDescription()))
 
+let SetTargetProfile tcConfigB v = 
+    tcConfigB.primaryAssembly <- 
+        match v with
+        | "mscorlib" -> PrimaryAssembly.Mscorlib
+        | "netcore"  -> PrimaryAssembly.DotNetCore
+        | _ -> error(Error(FSComp.SR.optsInvalidTargetProfile(v), rangeCmdArgs))
+
 let advancedFlagsBoth tcConfigB =
     [
-        codePageFlag tcConfigB
-        utf8OutputFlag tcConfigB
+        yield codePageFlag tcConfigB
+        yield utf8OutputFlag tcConfigB
 #if PREFERRED_UI_LANG
-        preferredUiLang tcConfigB
+        yield preferredUiLang tcConfigB
 #endif
-        fullPathsFlag tcConfigB
-        libFlag tcConfigB
+        yield fullPathsFlag tcConfigB
+        yield libFlag tcConfigB
+        yield CompilerOption("simpleresolution", 
+                             tagNone, 
+                             OptionUnit (fun () -> tcConfigB.useSimpleResolution<-true), 
+                             None, 
+                             Some (FSComp.SR.optsSimpleresolution()))
+        yield CompilerOption("targetprofile", tagString, OptionString (SetTargetProfile tcConfigB), None, Some(FSComp.SR.optsTargetProfile()))
     ]
 
 let noFrameworkFlag isFsc tcConfigB = 
@@ -761,13 +769,11 @@ let noFrameworkFlag isFsc tcConfigB =
                                                    tcConfigB.implicitlyResolveAssemblies <- false), None,
                            Some (FSComp.SR.optsNoframework()))
 
-let advancedFlagsFsi tcConfigB = advancedFlagsBoth tcConfigB  @ [noFrameworkFlag false tcConfigB]
-let setTargetProfile tcConfigB v = 
-    tcConfigB.primaryAssembly <- 
-        match v with
-        | "mscorlib" -> PrimaryAssembly.Mscorlib
-        | "netcore"  -> PrimaryAssembly.DotNetCore
-        | _ -> error(Error(FSComp.SR.optsInvalidTargetProfile(v), rangeCmdArgs))
+let advancedFlagsFsi tcConfigB = 
+    advancedFlagsBoth tcConfigB  @
+    [
+        yield noFrameworkFlag false tcConfigB
+    ]
 
 let advancedFlagsFsc tcConfigB =
     advancedFlagsBoth tcConfigB @
@@ -791,11 +797,8 @@ let advancedFlagsFsc tcConfigB =
 #endif
         yield CompilerOption("pdb", tagString, OptionString (fun s -> tcConfigB.debugSymbolFile <- Some s), None,
                              Some (FSComp.SR.optsPdb()))
-        yield CompilerOption("simpleresolution", tagNone, OptionUnit (fun () -> tcConfigB.useSimpleResolution<-true), None,
-                             Some (FSComp.SR.optsSimpleresolution()))
         yield CompilerOption("highentropyva", tagNone, OptionSwitch (useHighEntropyVASwitch tcConfigB), None, Some (FSComp.SR.optsUseHighEntropyVA()))
         yield CompilerOption("subsystemversion", tagString, OptionString (subSystemVersionSwitch tcConfigB), None, Some (FSComp.SR.optsSubSystemVersion()))
-        yield CompilerOption("targetprofile", tagString, OptionString (setTargetProfile tcConfigB), None, Some(FSComp.SR.optsTargetProfile()))
         yield CompilerOption("quotations-debug", tagNone, OptionSwitch(fun switch -> tcConfigB.emitDebugInfoInQuotations <- switch = OptionSwitch.On), None, Some(FSComp.SR.optsEmitDebugInfoInQuotations()))
     ]
 
@@ -820,7 +823,7 @@ let testFlag tcConfigB =
                                             | str                -> warning(Error(FSComp.SR.optsUnknownArgumentToTheTestSwitch(str),rangeCmdArgs))), None,
                            None)
 
-// not shown in fsc.exe help, no warning on use, motiviation is for use from VS
+// not shown in fsc.exe help, no warning on use, motivation is for use from VS
 let vsSpecificFlags (tcConfigB: TcConfigBuilder) = 
   [ CompilerOption("vserrors", tagNone, OptionUnit (fun () -> tcConfigB.errorStyle <- ErrorStyle.VSErrors), None, None)
     CompilerOption("validate-type-providers", tagNone, OptionUnit (id), None, None)  // preserved for compatibility's sake, no longer has any effect
@@ -843,7 +846,6 @@ let internalFlags (tcConfigB:TcConfigBuilder) =
     CompilerOption("termsfile" , tagNone, OptionUnit (fun () -> tcConfigB.writeTermsToFiles <- true), Some(InternalCommandLineOption("--termsfile", rangeCmdArgs)), None)
 #if DEBUG
     CompilerOption("debug-parse", tagNone, OptionUnit (fun () -> Internal.Utilities.Text.Parsing.Flags.debug <- true), Some(InternalCommandLineOption("--debug-parse", rangeCmdArgs)), None)
-    CompilerOption("ilfiles", tagNone, OptionUnit (fun () -> tcConfigB.writeGeneratedILFiles <- true), Some(InternalCommandLineOption("--ilfiles", rangeCmdArgs)), None)
 #endif
     CompilerOption("pause", tagNone, OptionUnit (fun () -> tcConfigB.pause <- true), Some(InternalCommandLineOption("--pause", rangeCmdArgs)), None)
     CompilerOption("detuple", tagNone, OptionInt (setFlag (fun v -> tcConfigB.doDetuple <- v)), Some(InternalCommandLineOption("--detuple", rangeCmdArgs)), None)
@@ -1199,8 +1201,6 @@ let ReportTime (tcConfig:TcConfig) descr =
 
     nPrev := Some descr
 
-#if NO_COMPILER_BACKEND
-#else  
 //----------------------------------------------------------------------------
 // OPTIMIZATION - support - addDllToOptEnv
 //----------------------------------------------------------------------------
@@ -1310,7 +1310,7 @@ let CreateIlxAssemblyGenerator (_tcConfig:TcConfig,tcImports:TcImports,tcGlobals
     ilxGenerator.AddExternalCcus ccus
     ilxGenerator
 
-let GenerateIlxCode (ilxBackend, isInteractiveItExpr, isInteractiveOnMono, tcConfig:TcConfig, topAttrs, optimizedImpls, fragName, netFxHasSerializableAttribute, ilxGenerator : IlxAssemblyGenerator) =
+let GenerateIlxCode (ilxBackend, isInteractiveItExpr, isInteractiveOnMono, tcConfig:TcConfig, topAttrs, optimizedImpls, fragName, ilxGenerator : IlxAssemblyGenerator) =
     if !progress then dprintf "Generating ILX code...\n"
     let ilxGenOpts : IlxGenOptions = 
         { generateFilterBlocks = tcConfig.generateFilterBlocks
@@ -1324,23 +1324,21 @@ let GenerateIlxCode (ilxBackend, isInteractiveItExpr, isInteractiveOnMono, tcCon
           ilxBackend = ilxBackend
           isInteractive = tcConfig.isInteractive
           isInteractiveItExpr = isInteractiveItExpr
-          netFxHasSerializableAttribute = netFxHasSerializableAttribute
           alwaysCallVirt = tcConfig.alwaysCallVirt }
 
     ilxGenerator.GenerateCode (ilxGenOpts, optimizedImpls, topAttrs.assemblyAttrs,topAttrs.netModuleAttrs) 
-#endif // !NO_COMPILER_BACKEND
 
 //----------------------------------------------------------------------------
 // Assembly ref normalization: make sure all assemblies are referred to
 // by the same references. Only used for static linking.
 //----------------------------------------------------------------------------
 
-let NormalizeAssemblyRefs (tcImports:TcImports) scoref =
+let NormalizeAssemblyRefs (ctok, tcImports:TcImports) scoref =
     match scoref with 
     | ILScopeRef.Local 
     | ILScopeRef.Module _ -> scoref
     | ILScopeRef.Assembly aref -> 
-        match tcImports.TryFindDllInfo (Range.rangeStartup,aref.Name,lookupOnly=false) with 
+        match tcImports.TryFindDllInfo (ctok, Range.rangeStartup, aref.Name, lookupOnly=false) with 
         | Some dllInfo -> dllInfo.ILScopeRef
         | None -> scoref
 
@@ -1349,27 +1347,34 @@ let GetGeneratedILModuleName (t:CompilerTarget) (s:string) =
     let ext = match t with | Dll -> "dll" | Module -> "netmodule" | _ -> "exe"
     s + "." + ext
 
-
 let ignoreFailureOnMono1_1_16 f = try f() with _ -> ()
 
-let DoWithErrorColor isWarn f =
-    if not enableConsoleColoring then
+let foreBackColor () =
+    try
+        let c = Console.ForegroundColor // may fail, perhaps on Mac, and maybe ForegroundColor is Black
+        let b = Console.BackgroundColor // may fail, perhaps on Mac, and maybe BackgroundColor is White
+        Some (c,b)
+    with
+        e -> None
+
+let DoWithColor newColor f =
+    match enableConsoleColoring, foreBackColor() with
+    | false, _
+    | true, None ->
+        // could not get console colours, so no attempt to change colours, can not set them back
         f()
-    else
-        let foreBackColor =
-            try
-                let c = Console.ForegroundColor // may fail, perhaps on Mac, and maybe ForegroundColor is Black
-                let b = Console.BackgroundColor // may fail, perhaps on Mac, and maybe BackgroundColor is White
-                Some (c,b)
-            with
-                e -> None
-        match foreBackColor with
-          | None -> f() (* could not get console colours, so no attempt to change colours, can not set them back *)
-          | Some (c,_) ->
-              try
-                let warnColor  = if Console.BackgroundColor = ConsoleColor.White then ConsoleColor.DarkBlue else ConsoleColor.Cyan
-                let errorColor = ConsoleColor.Red
-                ignoreFailureOnMono1_1_16 (fun () -> Console.ForegroundColor <- (if isWarn then warnColor else errorColor))
-                f()
-              finally
-                ignoreFailureOnMono1_1_16 (fun () -> Console.ForegroundColor <- c)
+    | true, Some (c,_) ->
+        try
+            ignoreFailureOnMono1_1_16 (fun () -> Console.ForegroundColor <- newColor)
+            f()
+        finally
+            ignoreFailureOnMono1_1_16 (fun () -> Console.ForegroundColor <- c)
+
+let DoWithErrorColor isError f =
+    match foreBackColor() with
+    | None -> f()
+    | Some (_, backColor) ->
+        let warnColor = if backColor = ConsoleColor.White then ConsoleColor.DarkBlue else ConsoleColor.Cyan
+        let errorColor = ConsoleColor.Red
+        let color = if isError then errorColor else warnColor 
+        DoWithColor color f

@@ -17,7 +17,7 @@ open Microsoft.VisualStudio.FSharp.LanguageService
 open Microsoft.FSharp.Compiler.SourceCodeServices
 open Microsoft.FSharp.Compiler.Range
 
-[<TestFixture>]
+[<TestFixture>][<Category "Roslyn Services">]
 type DocumentDiagnosticAnalyzerTests()  =
     let filePath = "C:\\test.fs"
     let startMarker = "(*start*)"
@@ -30,20 +30,28 @@ type DocumentDiagnosticAnalyzerTests()  =
         IsIncompleteTypeCheckEnvironment = true
         UseScriptResolutionRules = false
         LoadTime = DateTime.MaxValue
+        OriginalLoadReferences = []
         UnresolvedReferences = None
+        ExtraProjectInfo = None
     }
+
+    let getDiagnostics (fileContents: string) = 
+        async {
+            let! syntacticDiagnostics = FSharpDocumentDiagnosticAnalyzer.GetDiagnostics(FSharpChecker.Instance, filePath, SourceText.From(fileContents), 0, options, DiagnosticsType.Syntax) 
+            let! semanticDiagnostics = FSharpDocumentDiagnosticAnalyzer.GetDiagnostics(FSharpChecker.Instance, filePath, SourceText.From(fileContents), 0, options, DiagnosticsType.Semantic) 
+            return syntacticDiagnostics.AddRange(semanticDiagnostics)
+        } |> Async.RunSynchronously
 
     member private this.VerifyNoErrors(fileContents: string, ?additionalFlags: string[]) =
         let additionalOptions = match additionalFlags with
                                 | None -> options
                                 | Some(flags) -> {options with OtherOptions = Array.append options.OtherOptions flags}
 
-        let errors = FSharpDocumentDiagnosticAnalyzer.GetDiagnostics(filePath, SourceText.From(fileContents), 0, additionalOptions, true)
+        let errors = getDiagnostics fileContents
         Assert.AreEqual(0, errors.Length, "There should be no errors generated")
 
     member private this.VerifyErrorAtMarker(fileContents: string, expectedMarker: string, ?expectedMessage: string) =
-        let errors = FSharpDocumentDiagnosticAnalyzer.GetDiagnostics(filePath, SourceText.From(fileContents), 0, options, true) |>
-            Seq.filter(fun e -> e.Severity = DiagnosticSeverity.Error) |> Seq.toArray
+        let errors = getDiagnostics fileContents |> Seq.filter(fun e -> e.Severity = DiagnosticSeverity.Error) |> Seq.toArray
         Assert.AreEqual(1, errors.Length, "There should be exactly one error generated")
         let actualError = errors.[0]
         if expectedMessage.IsSome then
@@ -55,8 +63,7 @@ type DocumentDiagnosticAnalyzerTests()  =
         Assert.AreEqual(expectedEnd, actualError.Location.SourceSpan.End, "Error end positions should match")
 
     member private this.VerifyDiagnosticBetweenMarkers(fileContents: string, expectedMessage: string, expectedSeverity: DiagnosticSeverity) =
-        let errors = FSharpDocumentDiagnosticAnalyzer.GetDiagnostics(filePath, SourceText.From(fileContents), 0, options, true) |>
-            Seq.filter(fun e -> e.Severity = expectedSeverity) |> Seq.toArray
+        let errors = getDiagnostics fileContents |> Seq.filter(fun e -> e.Severity = expectedSeverity) |> Seq.toArray
         Assert.AreEqual(1, errors.Length, "There should be exactly one error generated")
         let actualError = errors.[0]
         Assert.AreEqual(expectedSeverity, actualError.Severity)
@@ -225,7 +232,7 @@ let x: float = 1.2(*start*).(*end*)3
 let gDateTime (arr: (*start*)DateTime(*end*)[]) =
     arr.[0]
             """,
-            expectedMessage = "The type 'DateTime' is not defined")
+            expectedMessage = "The type 'DateTime' is not defined.")
             
     [<Test>]
     member public this.Error_CyclicalDeclarationDoesNotCrash() = 
