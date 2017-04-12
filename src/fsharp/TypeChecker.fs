@@ -1,4 +1,4 @@
-// Copyright (c) Microsoft Corporation.  All Rights Reserved.  See License.txt in the project root for license information.
+// Copyright (c) Microsoft Corporation.  All Rights Reserved.  Licensed under the Apache License, Version 2.0.  See License.txt in the project root for license information.
 
 /// The typechecker.  Left-to-right constrained type checking 
 /// with generalization at appropriate points.
@@ -4678,7 +4678,7 @@ and TcTyparConstraints cenv newOk checkCxs occ env tpenv wcs =
     let _, tpenv = List.fold (fun (ridx, tpenv) tc -> ridx - 1, TcTyparConstraint ridx cenv newOk checkCxs occ env tpenv tc) (List.length wcs - 1, tpenv) wcs
     tpenv
 
-#if EXTENSIONTYPING
+//#if EXTENSIONTYPING
 and TcStaticConstantParameter cenv (env:TcEnv) tpenv kind (v:SynType) idOpt container =
     let fail() = error(Error(FSComp.SR.etInvalidStaticArgument(NicePrint.minimalStringOfType env.DisplayEnv kind), v.Range)) 
     let record ttype =
@@ -4749,13 +4749,8 @@ and TcStaticConstantParameter cenv (env:TcEnv) tpenv kind (v:SynType) idOpt cont
                 | Exception err -> raise(err)
                 | Result tcref -> tcref 
 
-            let st = cenv.topCcu.LinkTyconRefAsTypeValue (Some cenv.topCcu, tcref, m)
-            //assm.GetType(tcref.CompiledRepresentationForNamedType.QualifiedName)
-            //TODO:: 
-                //Assemebly Reflection Starterpack. 
-                //Back type information with tycon ref.
-                //Types should be amortised, created only once. 
-                //Minimal implementation at first. 
+            let assm = cenv.topCcu.ReflectAssembly :?> TastReflect.ReflectAssembly
+            let st = assm.TxTType (snd (generalizeTyconRef tcref))
                 
             record(cenv.g.system_Type_typ); 
             box st, tpenv
@@ -4876,7 +4871,7 @@ and TcProvidedTypeApp cenv env tpenv tcref args m =
     else
         let typ = Import.ImportProvidedType cenv.amap m providedTypeAfterStaticArguments
         typ, tpenv 
-#endif
+//#endif
 
 /// Typecheck an application of a generic type to type arguments.
 ///

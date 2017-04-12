@@ -200,6 +200,7 @@ type ILScopeRef =
     member ModuleRef: ILModuleRef
     member AssemblyRef: ILAssemblyRef
     member QualifiedName: string
+    member QualifiedNameWithNoShortPrimaryAssembly: string
 
 // Calling conventions.  
 //
