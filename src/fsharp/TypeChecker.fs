@@ -4722,7 +4722,7 @@ and TcTyparConstraints cenv newOk checkCxs occ env tpenv wcs =
     let _,tpenv = List.fold (fun (ridx,tpenv) tc -> ridx - 1, TcTyparConstraint ridx cenv newOk checkCxs occ env tpenv tc) (List.length wcs - 1, tpenv) wcs
     tpenv
 
-#if EXTENSIONTYPING
+//#if EXTENSIONTYPING
 and TcStaticConstantParameter cenv (env:TcEnv) tpenv kind (v:SynType) idOpt container =
     let fail() = error(Error(FSComp.SR.etInvalidStaticArgument(NicePrint.minimalStringOfType env.DisplayEnv kind),v.Range)) 
     let record ttype =
@@ -4751,7 +4751,7 @@ and TcStaticConstantParameter cenv (env:TcEnv) tpenv kind (v:SynType) idOpt cont
             | SynConst.String (s,_) when s <> null && typeEquiv cenv.g cenv.g.string_ty kind  -> record(cenv.g.string_ty); box (s:string)
             | SynConst.Bool b       when typeEquiv cenv.g cenv.g.bool_ty kind    -> record(cenv.g.bool_ty); box (b:bool)
             | _ -> fail()
-        v, tpenv
+        PrettyNaming.StaticArg v, tpenv
     | SynType.StaticConstantExpr(e, _ ) ->
 
         // If an error occurs, don't try to recover, since the constant expression will be nothing like what we need
@@ -4781,7 +4781,7 @@ and TcStaticConstantParameter cenv (env:TcEnv) tpenv kind (v:SynType) idOpt cont
                 | Const.Bool b     -> record(cenv.g.bool_ty); box (b:bool)
                 | _ ->  fail()
             | _ -> error(Error(FSComp.SR.tcInvalidConstantExpression(),v.Range))
-        v, tpenv'   
+        PrettyNaming.StaticArg v, tpenv'   
     | SynType.LongIdent(lidwd) ->
         let m = lidwd.Range
         if typeEquiv cenv.g cenv.g.system_Type_typ kind then
@@ -4793,16 +4793,11 @@ and TcStaticConstantParameter cenv (env:TcEnv) tpenv kind (v:SynType) idOpt cont
                 | Exception err -> raise(err)
                 | Result tcref -> tcref 
 
-            let st = cenv.topCcu.LinkTyconRefAsTypeValue (Some cenv.topCcu, tcref, m)
-            //assm.GetType(tcref.CompiledRepresentationForNamedType.QualifiedName)
-            //TODO:: 
-                //Assemebly Reflection Starterpack. 
-                //Back type information with tycon ref.
-                //Types should be amortised, created only once. 
-                //Minimal implementation at first. 
+            let assm = cenv.topCcu.ReflectAssembly :?> TastReflect.ReflectAssembly
+            let st = assm.TxTType (snd (generalizeTyconRef tcref))
                 
             record(cenv.g.system_Type_typ); 
-            box st, tpenv
+            PrettyNaming.StaticArg (box st), tpenv
         else 
             TcStaticConstantParameter cenv env tpenv kind (SynType.StaticConstantExpr(SynExpr.LongIdent(false,lidwd,None,m),m)) idOpt container
     | _ ->  
@@ -4852,7 +4847,7 @@ and CrackStaticConstantArgs cenv env tpenv (staticParameters: Tainted<ProvidedPa
                     if sp.PUntaint((fun sp -> sp.IsOptional), m) then
                          match sp.PUntaint((fun sp -> sp.RawDefaultValue), m) with
                          | null -> error (Error(FSComp.SR.etStaticParameterRequiresAValue (spName, containerName, containerName, spName) ,m))
-                         | v -> v
+                         | v -> PrettyNaming.StaticArg v
                     else
                       error (Error(FSComp.SR.etStaticParameterRequiresAValue (spName, containerName, containerName, spName),m))
                  | ps -> 
@@ -4920,7 +4915,7 @@ and TcProvidedTypeApp cenv env tpenv tcref args m =
     else
         let typ = Import.ImportProvidedType cenv.amap m providedTypeAfterStaticArguments
         typ,tpenv 
-#endif
+//#endif
 
 /// Typecheck an application of a generic type to type arguments.
 ///

@@ -3733,6 +3733,7 @@ type TcImports(tcConfigP:TcConfigProvider, initialResolutions:TcAssemblyResoluti
     let mutable ilGlobalsOpt = ilGlobalsOpt
     let mutable tcGlobals = None
 #if EXTENSIONTYPING
+    let mutable ccuBeingCompiledHack : CcuThunk option = None
     let mutable generatedTypeRoots = new System.Collections.Generic.Dictionary<ILTypeRef, int * ProviderGeneratedType>()
 #endif
     
@@ -3842,39 +3843,76 @@ type TcImports(tcConfigP:TcConfigProvider, initialResolutions:TcAssemblyResoluti
         CheckDisposed()
         match tcImports.FindCcuInfo(ctok, m, assemblyName, lookupOnly) with
         | ResolvedImportedAssembly(importedAssembly) -> ResolvedCcu(importedAssembly.FSharpViewOfMetadata)
-        | UnresolvedImportedAssembly(assemblyName) -> UnresolvedCcu(assemblyName)
+        | UnresolvedImportedAssembly(assemblyName) -> 
+#if EXTENSIONTYPING
+            match ccuBeingCompiledHack with 
+            | Some thisCcu when thisCcu.AssemblyName = assemblyName -> ResolvedCcu(thisCcu)
+            | _ -> 
+#endif
+                UnresolvedCcu(assemblyName)
 
-    member tcImports.FindCcuFromAssemblyRef(ctok, m, assref:ILAssemblyRef) = 
-        CheckDisposed()
-        match tcImports.FindCcuInfo(ctok, m, assref.Name, lookupOnly=false) with
-        | ResolvedImportedAssembly(importedAssembly) -> ResolvedCcu(importedAssembly.FSharpViewOfMetadata)
-        | UnresolvedImportedAssembly _ -> UnresolvedCcu(assref.QualifiedName)
+    member tcImports.FindCcuFromScopeRef(ctok, m, scoref) = 
+        match scoref with 
+        | ILScopeRef.Local    -> 
+#if EXTENSIONTYPING
+                match ccuBeingCompiledHack with 
+                | Some thisCcu -> ResolvedCcu(thisCcu)
+                | _ -> 
+#endif
+                    UnresolvedCcu("local")
+        | ILScopeRef.Module _ -> error(InternalError("FindCcuFromScopeRef: reference found to a type in an auxiliary module",m))
+        | ILScopeRef.Assembly assref -> 
+
+            CheckDisposed()
+            match tcImports.FindCcuInfo(ctok, m, assref.Name, lookupOnly=false) with
+            | ResolvedImportedAssembly(importedAssembly) -> ResolvedCcu(importedAssembly.FSharpViewOfMetadata)
+            | UnresolvedImportedAssembly _ -> 
+#if EXTENSIONTYPING
+                match ccuBeingCompiledHack with 
+                | Some thisCcu when thisCcu.AssemblyName = assref.Name -> ResolvedCcu(thisCcu)
+                | _ -> 
+#endif
+                    UnresolvedCcu(assref.QualifiedName)
 
 
 #if EXTENSIONTYPING
     member tcImports.ImportQualifiedTypeNameAsTypeValue(qname:string, m) = 
-        if not (qname.Contains(",")) then failwith (sprintf "expected a qualified type name: %+A" qname)
+        // Qualified name string --> TyconRef 
+        assert (qname.Contains(",")) // we expected a qualified type name, even for references to the assembly being compiled
         let commaPos = qname.IndexOf ','
         let typeName = qname.[0..commaPos-1] 
-        let assName = if commaPos+2 < qname.Length then qname.[commaPos+2..]  else ""
-        let ilAssRef = ILAssemblyRef.FromAssemblyName (System.Reflection.AssemblyName assName)
-        // TODO: nested type definitions
-        if typeName.Contains("+") then failwith (sprintf "nested type def: %+A" typeName)
-        let ilTypeRef = ILTypeRef.Create(ILScopeRef.Assembly ilAssRef, [], typeName)
-        let tcref = Import.ImportILTypeRef (tcImports.GetImportMap()) m ilTypeRef 
-        tcImports.LinkTyconRefAsTypeValue(None, tcref, m)
+        let ilTypeRef = 
+            let assName = if commaPos+2 < qname.Length then qname.[commaPos+2..]  else ""
+            let ilAssRef = ILAssemblyRef.FromAssemblyName (System.Reflection.AssemblyName assName)
+            let ilScoRef = ILScopeRef.Assembly ilAssRef
+            if typeName.Contains("+") then 
+                let pieces = typeName.Split('+')
+                ILTypeRef.Create(ilScoRef, Array.toList pieces.[0..pieces.Length-2], pieces.[pieces.Length-1])
+            else
+                ILTypeRef.Create(ilScoRef, [], typeName)
 
-    member tcImports.LinkTyconRefAsTypeValue(thisCcuOpt, tcref: TyconRef, m) = 
-        let ccu = 
-            match ccuOfTyconRef tcref with 
-            | Some ccu -> ccu 
-            | None -> 
-            match thisCcuOpt with 
-            | Some ccu -> ccu 
-            | None -> failwith (sprintf "TODO: didn't get back to CCU being compiled for local tcref %s" tcref.DisplayName)
-        let assm = TastReflect.ReflectAssembly(tcImports.GetTcGlobals(), ccu, "", m)
-        let rtd = assm.TxTypeDef None tcref
-        rtd
+        // See if this type is fromm the assembly being compiled. If so, look up the table
+        let st = 
+            match ccuBeingCompiledHack with 
+            | Some ccu when ccu.AssemblyName = ilTypeRef.Scope.AssemblyRef.Name ->
+                let asm = ccu.ReflectAssembly :?> TastReflect.ReflectAssembly
+                match asm.GetType(typeName) with 
+                | null -> failwith (sprintf "couldn't get type '%s' from assembly '%s'" typeName ccu.AssemblyName)
+                | st -> st
+            | _ -> 
+                let tcref = Import.ImportILTypeRef (tcImports.GetImportMap()) m ilTypeRef 
+                // TyconRef --> ReflectTypeDefinition value
+                let ccu = 
+                    match ccuOfTyconRef tcref with 
+                    | Some ccu -> ccu 
+                    | None -> 
+                    match ccuBeingCompiledHack with 
+                    | Some ccu -> ccu 
+                    | None -> failwith (sprintf "TODO: didn't get back to CCU being compiled for local tcref %s" tcref.DisplayName)
+                let asm = ccu.ReflectAssembly :?> TastReflect.ReflectAssembly
+                asm.TxTypeDef None tcref
+        printfn "resurrected type value st.AssemblyQualifiedName='%s'" st.AssemblyQualifiedName
+        st
 
     member tcImports.GetProvidedAssemblyInfo(ctok, m, assembly: Tainted<ProvidedAssembly>) = 
         let anameOpt = assembly.PUntaint((fun assembly -> match assembly with null -> None | a -> Some (a.GetName())), m)
@@ -3926,10 +3964,12 @@ type TcImports(tcConfigP:TcConfigProvider, initialResolutions:TcAssemblyResoluti
                 MemberSignatureEquality = (fun ty1 ty2 -> Tastops.typeEquivAux EraseAll g ty1 ty2)
                 ImportProvidedType = (fun ty -> Import.ImportProvidedType (tcImports.GetImportMap()) m ty)
                 ImportQualifiedTypeNameAsTypeValue = (fun (m,qname) ->  tcImports.ImportQualifiedTypeNameAsTypeValue (m, qname))
-                LinkTyconRefAsTypeValue = (fun (thisCcuOpt, tcref, m) ->  tcImports.LinkTyconRefAsTypeValue (thisCcuOpt, tcref, m))
+                ReflectAssembly = lazy null
+                GetCcuBeingCompiledHack = (fun () -> ccuBeingCompiledHack)
                 TypeForwarders = Map.empty }
                     
             let ccu = CcuThunk.Create(ilShortAssemName,ccuData)
+            ccuData.ReflectAssembly <- lazy (TastReflect.ReflectAssembly(g,ccu,fileName) :> _)
             let ccuinfo = 
                 { FSharpViewOfMetadata=ccu 
                   ILScopeRef = ilScopeRef 
@@ -3950,6 +3990,9 @@ type TcImports(tcConfigP:TcConfigProvider, initialResolutions:TcAssemblyResoluti
             | true,(index, _) -> index
             | false, _ -> generatedTypeRoots.Count
         generatedTypeRoots.[ilTyRef] <- (index, root)
+
+    member tcImports.SetCcuBeingCompiledHack thisCcu = 
+        ccuBeingCompiledHack <- Some thisCcu
 
     member tcImports.ProviderGeneratedTypeRoots = 
         generatedTypeRoots.Values
@@ -4026,8 +4069,8 @@ type TcImports(tcConfigP:TcConfigProvider, initialResolutions:TcAssemblyResoluti
         CheckDisposed()
         let loaderInterface = 
             { new Import.AssemblyLoader with 
-                 member x.FindCcuFromAssemblyRef (ctok, m, ilAssemblyRef) = 
-                     tcImports.FindCcuFromAssemblyRef (ctok, m,ilAssemblyRef)
+                 member x.FindCcuFromScopeRef (ctok, m, scoref) = 
+                     tcImports.FindCcuFromScopeRef (ctok, m,scoref)
 #if EXTENSIONTYPING
                  member x.GetProvidedAssemblyInfo (ctok, m, assembly) = tcImports.GetProvidedAssemblyInfo (ctok, m, assembly)
                  member x.RecordGeneratedTypeRoot root = tcImports.RecordGeneratedTypeRoot root
@@ -4251,6 +4294,8 @@ type TcImports(tcConfigP:TcConfigProvider, initialResolutions:TcAssemblyResoluti
         let auxModuleLoader = tcImports.MkLoaderForMultiModuleILAssemblies ctok m
         let invalidateCcu = new Event<_>()
         let ccu = Import.ImportILAssembly(tcImports.GetImportMap,m,auxModuleLoader,ilScopeRef,tcConfig.implicitIncludeDir, Some filename,ilModule,invalidateCcu.Publish)
+        ccu.Deref.ReflectAssembly <- lazy (TastReflect.ReflectAssembly(tcImports.GetTcGlobals(),ccu,filename) :> _)
+        ccu.Deref.GetCcuBeingCompiledHack <- (fun () -> Some ccu)
         
         let ilg = defaultArg ilGlobalsOpt EcmaMscorlibILGlobals
 
@@ -4312,13 +4357,15 @@ type TcImports(tcConfigP:TcConfigProvider, initialResolutions:TcAssemblyResoluti
                       IsProviderGenerated = false
                       ImportProvidedType = (fun ty -> Import.ImportProvidedType (tcImports.GetImportMap()) m ty)
                       ImportQualifiedTypeNameAsTypeValue = (fun (m,qname) ->  tcImports.ImportQualifiedTypeNameAsTypeValue (m, qname))
-                      LinkTyconRefAsTypeValue = (fun (thisCcuOpt, tcref, m) ->  tcImports.LinkTyconRefAsTypeValue (thisCcuOpt, tcref, m))
+                      GetCcuBeingCompiledHack = (fun () -> ccuBeingCompiledHack)
+                      ReflectAssembly = lazy null
 #endif
                       UsesFSharp20PlusQuotations = minfo.usesQuotations
                       MemberSignatureEquality= (fun ty1 ty2 -> Tastops.typeEquivAux EraseAll (tcImports.GetTcGlobals()) ty1 ty2)
                       TypeForwarders = ImportILAssemblyTypeForwarders(tcImports.GetImportMap, m, ilModule.GetRawTypeForwarders()) }
 
                 let ccu = CcuThunk.Create(ccuName, ccuData)
+                ccuData.ReflectAssembly <- lazy (TastReflect.ReflectAssembly(tcImports.GetTcGlobals(),ccu,filename)  :> _)
 
                 let optdata = 
                     lazy 
@@ -5196,7 +5243,8 @@ let GetInitialTcState(m,ccuName,tcConfig:TcConfig,tcGlobals,tcImports:TcImports,
           IsProviderGenerated = false
           ImportProvidedType = (fun ty -> Import.ImportProvidedType (tcImports.GetImportMap()) m ty)
           ImportQualifiedTypeNameAsTypeValue = (fun (m,qname) ->  tcImports.ImportQualifiedTypeNameAsTypeValue (m, qname))
-          LinkTyconRefAsTypeValue = (fun (thisCcuOpt, tcref, m) ->  tcImports.LinkTyconRefAsTypeValue (thisCcuOpt, tcref, m))
+          GetCcuBeingCompiledHack = (fun () -> None)
+          ReflectAssembly = lazy null
 #endif
           FileName=None 
           Stamp = newStamp()
@@ -5208,6 +5256,11 @@ let GetInitialTcState(m,ccuName,tcConfig:TcConfig,tcGlobals,tcImports:TcImports,
           TypeForwarders=Map.empty }
 
     let ccu = CcuThunk.Create(ccuName,ccuData)
+
+    ccuData.ReflectAssembly <- lazy (TastReflect.ReflectAssembly(tcGlobals,ccu,ccuName + ".dll")  :> _)
+    ccuData.GetCcuBeingCompiledHack <- (fun () -> Some ccu)
+
+    tcImports.SetCcuBeingCompiledHack ccu
 
     // OK, is this is the FSharp.Core CCU then fix it up. 
     if tcConfig.compilingFslib then 
@@ -5235,6 +5288,7 @@ let TypeCheckOneInputEventually
       RequireCompilationThread ctok // Everything here requires the compilation thread since it works on the TAST
 
       CheckSimulateException(tcConfig)
+      tcImports.SetCcuBeingCompiledHack tcState.Ccu
       let (RootSigsAndImpls(rootSigs,rootImpls,allSigModulTyp,allImplementedSigModulTyp)) = tcState.tcsRootSigsAndImpls
       let m = inp.Range
       let amap = tcImports.GetImportMap()
