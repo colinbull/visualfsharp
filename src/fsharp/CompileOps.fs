@@ -4474,9 +4474,10 @@ type TcImports(tcConfigP:TcConfigProvider, initialResolutions:TcAssemblyResoluti
         let auxModuleLoader = tcImports.MkLoaderForMultiModuleILAssemblies ctok m
         let invalidateCcu = new Event<_>()
         let ccu = Import.ImportILAssembly(tcImports.GetImportMap, m, auxModuleLoader, ilScopeRef, tcConfig.implicitIncludeDir, Some filename, ilModule, invalidateCcu.Publish)
+#if EXTENSIONTYPING
         ccu.Deref.ReflectAssembly <- lazy (TastReflect.ReflectAssembly(tcImports.GetTcGlobals(),ccu,filename) :> _)
         ccu.Deref.GetCcuBeingCompiledHack <- (fun () -> Some ccu)
-        
+#endif
         let ilg = defaultArg ilGlobalsOpt EcmaMscorlibILGlobals
 
         let ccuinfo = 
@@ -4545,8 +4546,9 @@ type TcImports(tcConfigP:TcConfigProvider, initialResolutions:TcAssemblyResoluti
                       TypeForwarders = ImportILAssemblyTypeForwarders(tcImports.GetImportMap, m, ilModule.GetRawTypeForwarders()) }
 
                 let ccu = CcuThunk.Create(ccuName, ccuData)
+#if EXTENSIONTYPING
                 ccuData.ReflectAssembly <- lazy (TastReflect.ReflectAssembly(tcImports.GetTcGlobals(),ccu,filename)  :> _)
-
+#endif
                 let optdata = 
                     lazy 
                         (match Map.tryFind ccuName optDatas  with 
@@ -5453,11 +5455,12 @@ let GetInitialTcState(m, ccuName, tcConfig:TcConfig, tcGlobals, tcImports:TcImpo
 
     let ccu = CcuThunk.Create(ccuName, ccuData)
 
+#if EXTENSIONTYPING
     ccuData.ReflectAssembly <- lazy (TastReflect.ReflectAssembly(tcGlobals,ccu,ccuName + ".dll")  :> _)
     ccuData.GetCcuBeingCompiledHack <- (fun () -> Some ccu)
 
     tcImports.SetCcuBeingCompiledHack ccu
-
+#endif
     // OK, is this is the FSharp.Core CCU then fix it up. 
     if tcConfig.compilingFslib then 
         tcGlobals.fslibCcu.Fixup(ccu)
@@ -5485,7 +5488,9 @@ let TypeCheckOneInputEventually
       RequireCompilationThread ctok // Everything here requires the compilation thread since it works on the TAST
 
       CheckSimulateException(tcConfig)
+#if EXTENSIONTYPING
       tcImports.SetCcuBeingCompiledHack tcState.Ccu
+#endif
       let (RootSigsAndImpls(rootSigs, rootImpls, allSigModulTyp, allImplementedSigModulTyp)) = tcState.tcsRootSigsAndImpls
       let m = inp.Range
       let amap = tcImports.GetImportMap()

@@ -4678,7 +4678,7 @@ and TcTyparConstraints cenv newOk checkCxs occ env tpenv wcs =
     let _, tpenv = List.fold (fun (ridx, tpenv) tc -> ridx - 1, TcTyparConstraint ridx cenv newOk checkCxs occ env tpenv tc) (List.length wcs - 1, tpenv) wcs
     tpenv
 
-//#if EXTENSIONTYPING
+#if EXTENSIONTYPING
 and TcStaticConstantParameter cenv (env:TcEnv) tpenv kind (v:SynType) idOpt container =
     let fail() = error(Error(FSComp.SR.etInvalidStaticArgument(NicePrint.minimalStringOfType env.DisplayEnv kind), v.Range)) 
     let record ttype =
@@ -4887,7 +4887,7 @@ and TcProvidedTypeApp cenv env tpenv tcref args m =
     else
         let typ = Import.ImportProvidedType cenv.amap m providedTypeAfterStaticArguments
         typ, tpenv 
-//#endif
+#endif
 
 /// Typecheck an application of a generic type to type arguments.
 ///
