@@ -407,6 +407,9 @@
     <Compile Include="..\TastPickle.fs">
       <Link>TypedAST\TastPickle.fs</Link>
     </Compile>
+    <Compile Include="..\TastReflect.fs">
+      <Link>Logic\TastReflect.fs</Link>
+    </Compile>
     <Compile Include="..\import.fsi">
       <Link>Logic\import.fsi</Link>
     </Compile>
@@ -484,9 +487,6 @@
     </Compile>
     <Compile Include="..\PostInferenceChecks.fs">
       <Link>Logic\PostInferenceChecks.fs</Link>
-    </Compile>
-    <Compile Include="..\TastReflect.fs">
-      <Link>Logic\TastReflect.fs</Link>
     </Compile>
     <Compile Include="..\TypeChecker.fsi">
       <Link>Logic\TypeChecker.fsi</Link>
